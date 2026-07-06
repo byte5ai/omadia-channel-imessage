@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iMessage — Omadia</title>
+    <!-- Harness baseline stylesheet (byte5 tokens, light/dark, .harness-* helpers). -->
+    <link rel="stylesheet" href="/bot-api/_harness/admin-ui.css" />
+  </head>
+  <body>
+    <!-- #region builder:admin-ui-body -->
+    <style>
+      .im-wrap { max-width: var(--harness-iframe-max, 812px); }
+      .im-status-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin: 1rem 0;
+      }
+      .im-dot {
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: var(--radius-pill, 9999px);
+        background: var(--fg-subtle);
+        flex: none;
+      }
+      .im-dot[data-state='connected'] { background: var(--success); }
+      .im-dot[data-state='starting'] { background: var(--warning); }
+      .im-dot[data-state='error'] { background: var(--danger); }
+      .im-state-label { font-weight: 600; color: var(--fg-strong); }
+      .im-me { font-family: var(--font-mono); color: var(--fg-strong); }
+      .im-url {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+        word-break: break-all;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm, 8px);
+        padding: 0.5rem 0.6rem;
+        margin: 0.4rem 0;
+      }
+      .im-steps { margin: 0.5rem 0 0; padding-left: 1.1rem; color: var(--fg-muted); }
+      .im-steps li { margin: 0.35rem 0; }
+      .im-steps code { font-family: var(--font-mono); }
+      .im-muted { color: var(--fg-muted); font-size: 0.85rem; }
+    </style>
+
+    <div class="im-wrap">
+      <h1>iMessage</h1>
+      <p class="harness-subtitle">
+        Verbindet eine Sendblue-Line mit deinem Omadia-Orchestrator. Eingehende
+        iMessage-Chats werden durch deine Agenten geroutet.
+      </p>
+
+      <div id="global-err" class="harness-banner-error" role="alert" hidden></div>
+
+      <div class="im-status-row">
+        <span id="dot" class="im-dot" data-state="starting" aria-hidden="true"></span>
+        <span id="state-label" class="im-state-label">Lade…</span>
+      </div>
+
+      <!-- Connected -->
+      <section id="connected-section" hidden>
+        <div class="harness-banner-info" role="status">
+          Aktiv auf Sendblue-Line <span id="me" class="im-me">—</span>
+        </div>
+        <p id="last-inbound" class="im-muted" hidden></p>
+      </section>
+
+      <!-- Webhook: receive URL to register in the Sendblue dashboard -->
+      <section id="webhook-section" hidden>
+        <p><b>Receive-Webhook</b> — im Sendblue-Dashboard als Webhook-URL eintragen
+          (<code>&lt;PUBLIC_BASE_URL&gt;</code> und <code>&lt;webhook_secret&gt;</code> ersetzen):</p>
+        <div id="webhook-path" class="im-url">—</div>
+        <p id="webhook-verified" class="im-muted">Warte auf die erste authentifizierte Zustellung von Sendblue…</p>
+      </section>
+
+      <!-- Setup help (shown until the webhook is verified) -->
+      <section id="setup-section" hidden>
+        <div class="harness-empty">
+          <p>So richtest du Sendblue ein (<code>sendblue.com</code>):</p>
+          <ol class="im-steps">
+            <li><b>API-Keys:</b> im Sendblue-Dashboard <code>API Key ID</code> und
+              <code>API Secret Key</code> kopieren und im Plugin-Setup hinterlegen.</li>
+            <li><b>Absender-Nummer:</b> deine Sendblue-Line (E.164, z.B.
+              <code>+15122164639</code>) als <code>from_number</code> eintragen.</li>
+            <li><b>Webhook-Secret:</b> langes Zufallstoken generieren
+              (<code>openssl rand -hex 32</code>) und im Plugin-Setup speichern.</li>
+            <li><b>Receive-Webhook:</b> die URL oben (mit deinem Secret als letztem
+              Pfadsegment) im Sendblue-Dashboard als Webhook-URL eintragen.</li>
+            <li><b>Sandbox-Hinweis:</b> im Free-Tarif müssen Empfänger die Line zuerst
+              anschreiben, bevor die API sie erreichen darf.</li>
+          </ol>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const POLL_MS = 2500;
+      const el = (id) => document.getElementById(id);
+
+      const STATE_LABELS = {
+        starting: 'Starte…',
+        connected: 'Aktiv',
+        error: 'Fehler',
+      };
+
+      const show = (id, visible) => { el(id).hidden = !visible; };
+
+      function ago(ts) {
+        if (!ts) return '';
+        const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+        if (s < 60) return `vor ${s}s`;
+        if (s < 3600) return `vor ${Math.round(s / 60)}min`;
+        return `vor ${Math.round(s / 3600)}h`;
+      }
+
+      function render(s) {
+        el('dot').dataset.state = s.status;
+        el('state-label').textContent = STATE_LABELS[s.status] || s.status;
+
+        const err = el('global-err');
+        if (s.lastError) { err.textContent = s.lastError; err.hidden = false; }
+        else err.hidden = true;
+
+        const connected = s.status === 'connected';
+        show('connected-section', connected);
+        if (connected && s.me) el('me').textContent = s.me.fromNumber || '—';
+
+        const li = el('last-inbound');
+        if (connected && s.lastInboundAt) {
+          li.textContent = `Letzte Zustellung ${ago(s.lastInboundAt)}`;
+          li.hidden = false;
+        } else li.hidden = true;
+
+        // Receive URL + verification state (no url_verification handshake at
+        // Sendblue — the first authenticated delivery is the proof).
+        show('webhook-section', !!s.webhookPath);
+        if (s.webhookPath) {
+          el('webhook-path').textContent = `https://<PUBLIC_BASE_URL>${s.webhookPath}`;
+          el('webhook-verified').textContent = s.webhookVerified
+            ? '✓ Authentifizierte Zustellungen von Sendblue kommen an.'
+            : 'Warte auf die erste authentifizierte Zustellung von Sendblue…';
+        }
+
+        // Setup help until live traffic proves the wiring.
+        show('setup-section', !s.webhookVerified);
+      }
+
+      async function poll() {
+        try {
+          const data = await fetch('api/status', { cache: 'no-store' }).then((r) => r.json());
+          if (!data.ok) throw new Error(data.error || 'Statusabfrage fehlgeschlagen');
+          render(data);
+        } catch (e) {
+          const err = el('global-err');
+          err.textContent = e.message;
+          err.hidden = false;
+        }
+      }
+
+      poll();
+      setInterval(poll, POLL_MS);
+    </script>
+    <!-- #endregion -->
+  </body>
+</html>

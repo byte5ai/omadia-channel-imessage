@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="iMessage channel">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6FDD6B" />
+      <stop offset="1" stop-color="#0A84FF" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#g)" />
+  <!-- iMessage-style speech bubble with a little tail on the lower left -->
+  <path
+    fill="#ffffff"
+    d="M128 58c-42.5 0-77 27.6-77 61.6 0 19.6 11.5 37 29.4 48.3-1.5 8.4-5.4 16.9-12.5 23.4-1.6 1.5-.4 4.2 1.8 4 12.9-1.3 24.6-6.4 33.3-12.6 7.9 2.1 16.3 3.5 25 3.5 42.5 0 77-27.6 77-61.6S170.5 58 128 58z"
+  />
+  <!-- three typing dots -->
+  <circle cx="96" cy="120" r="10" fill="#0A84FF" opacity="0.85" />
+  <circle cx="128" cy="120" r="10" fill="#0A84FF" opacity="0.85" />
+  <circle cx="160" cy="120" r="10" fill="#0A84FF" opacity="0.85" />
+</svg>

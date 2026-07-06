@@ -1,0 +1,247 @@
+schema_version: "1"
+
+# ===========================================================================
+# @omadia/channel-imessage — iMessage channel (Sendblue REST API)
+# ---------------------------------------------------------------------------
+# Schema of truth: docs/harness-platform/manifest-schema.v1.yaml (section 14).
+# A channel ROUTES turns — it has NO capabilities / playbook of its own. It
+# receives Sendblue inbound-message webhooks, translates them to the core
+# IncomingTurn shape, drives the orchestrator, and sends the answer back via
+# Sendblue's send-message REST endpoint.
+# ===========================================================================
+
+identity:
+  id: "@omadia/channel-imessage" # === package.json "name"
+  kind: "channel"
+  domain: "imessage"
+  name: "iMessage"
+  version: "0.1.1" # === package.json "version"
+  description:
+    "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
+    Omadia-Orchestrator."
+  authors:
+    - name: "byte5 GmbH"
+      email: "info@omadia.ai"
+      url: "https://omadia.ai"
+  license: "MIT"
+  homepage: "https://github.com/byte5ai/omadia-channel-imessage"
+  icon: "./assets/icon.svg"
+  categories:
+    - "communication"
+
+compat:
+  core: ">=1.0 <2.0"
+  node: ">=20"
+
+depends_on: []
+
+lifecycle:
+  entry: "dist/plugin.js" # exports `activate(ctx, core)` (ChannelPlugin shape 1)
+  uninstall_policy:
+    entities: "delete"
+    memory: "delete"
+    secrets: "delete"
+
+# ---------------------------------------------------------------------------
+# Setup. Sendblue is a hosted iMessage relay: you register an account, get an
+# API key pair + a dedicated phone number ("line"), and point Sendblue's
+# receive-webhook at this plugin's public endpoint. The webhook is verified
+# with a self-generated shared secret carried in the URL path (Sendblue has
+# no HMAC signing).
+# ---------------------------------------------------------------------------
+setup:
+  guide:
+    en: |
+      ## Connect iMessage (Sendblue)
+
+      This channel uses **Sendblue** ([sendblue.com](https://sendblue.com)) — a
+      hosted iMessage relay with a REST API. You need a Sendblue account with a
+      dedicated line (phone number).
+
+      ### 1. Create a Sendblue account & get API keys
+      Sign up at Sendblue and copy the **API Key ID** and **API Secret Key**
+      from the dashboard (API settings). Note your Sendblue **line number**
+      (E.164, e.g. `+15122164639`).
+
+      ### 2. Fill in the fields below
+      - **API Key ID / API Secret Key**: from the Sendblue dashboard.
+      - **Sender number**: your Sendblue line in E.164 format.
+      - **Webhook secret**: generate a long random token yourself (e.g.
+        `openssl rand -hex 32`) and paste it here. It authenticates inbound
+        webhooks — treat it like a password.
+
+      ### 3. Register the webhook in the Sendblue dashboard
+      Set the **receive webhook URL** to:
+
+      `https://<PUBLIC_BASE_URL>/api/imessage/webhook/<webhook_secret>`
+
+      (replace `<webhook_secret>` with the exact token from step 2). If the
+      Sendblue dashboard offers a separate **webhook secret** field, put the
+      same token there too — the plugin also accepts the secret from a request
+      header.
+
+      ### 4. Sandbox note
+      On Sendblue's **free/sandbox tier** you share a line: recipients must
+      have **texted the line first** / be verified contacts before the API can
+      message them. A paid dedicated line has no such restriction.
+
+      > ⚠️ **Note:** Sendblue is an unofficial Apple iMessage relay — Apple
+      > offers no public iMessage API, so continuity depends on the provider.
+      > This connector is provider-swappable: only the thin REST client is
+      > Sendblue-specific.
+    de: |
+      ## iMessage verbinden (Sendblue)
+
+      Dieser Channel nutzt **Sendblue** ([sendblue.com](https://sendblue.com)) —
+      einen gehosteten iMessage-Relay mit REST-API. Du brauchst ein
+      Sendblue-Konto mit einer eigenen Line (Telefonnummer).
+
+      ### 1. Sendblue-Konto anlegen & API-Keys holen
+      Registriere dich bei Sendblue und kopiere **API Key ID** und **API Secret
+      Key** aus dem Dashboard (API-Einstellungen). Notiere deine Sendblue
+      **Line-Nummer** (E.164, z.B. `+15122164639`).
+
+      ### 2. Felder unten ausfüllen
+      - **API Key ID / API Secret Key**: aus dem Sendblue-Dashboard.
+      - **Absender-Nummer**: deine Sendblue-Line im E.164-Format.
+      - **Webhook-Secret**: generiere selbst ein langes Zufallstoken (z.B.
+        `openssl rand -hex 32`) und trage es hier ein. Es authentifiziert
+        eingehende Webhooks — behandle es wie ein Passwort.
+
+      ### 3. Webhook im Sendblue-Dashboard eintragen
+      Trage als **Receive-Webhook-URL** ein:
+
+      `https://<PUBLIC_BASE_URL>/api/imessage/webhook/<webhook_secret>`
+
+      (`<webhook_secret>` durch das Token aus Schritt 2 ersetzen). Bietet das
+      Sendblue-Dashboard zusätzlich ein **Webhook-Secret**-Feld an, trage dort
+      dasselbe Token ein — das Plugin akzeptiert das Secret auch aus einem
+      Request-Header.
+
+      ### 4. Sandbox-Hinweis
+      Im **Free-/Sandbox-Tarif** von Sendblue teilst du dir eine Line:
+      Empfänger müssen die Nummer **zuerst anschreiben** bzw. verifizierte
+      Kontakte sein, bevor die API sie erreichen darf. Eine bezahlte eigene
+      Line hat diese Einschränkung nicht.
+
+      > ⚠️ **Hinweis:** Sendblue ist eine inoffizielle Apple-iMessage-Anbindung —
+      > Apple bietet keine öffentliche iMessage-API, die Kontinuität hängt also
+      > vom Provider ab.
+  fields:
+    - key: "api_key_id"
+      type: "secret"
+      label: "Sendblue API Key ID"
+      help:
+        "API Key ID aus dem Sendblue-Dashboard (wird als Header sb-api-key-id
+        gesendet)."
+      required: true
+
+    - key: "api_secret_key"
+      type: "secret"
+      label: "Sendblue API Secret Key"
+      help:
+        "API Secret Key aus dem Sendblue-Dashboard (wird als Header
+        sb-api-secret-key gesendet)."
+      required: true
+
+    - key: "from_number"
+      type: "string"
+      label: "Absender-Nummer (Sendblue-Line)"
+      help:
+        "Deine Sendblue-Line im E.164-Format, z.B. +15122164639. Von dieser
+        Nummer sendet der Bot."
+      required: true
+
+    - key: "webhook_secret"
+      type: "secret"
+      label: "Webhook-Secret"
+      help:
+        "Selbst generiertes langes Zufallstoken (z.B. openssl rand -hex 32).
+        Muss identisch in der Sendblue-Webhook-URL als letztes Pfadsegment
+        stehen."
+      required: true
+
+    - key: "api_base_url"
+      type: "url"
+      label: "API-Basis-URL (optional)"
+      help:
+        "Sendblue REST-API-Basis für send-message. Nur ändern, wenn Sendblue
+        eine andere Basis vorgibt."
+      required: false
+      default: "https://api.sendblue.co"
+
+    - key: "api_v2_base_url"
+      type: "url"
+      label: "API-v2-Basis-URL (optional)"
+      help:
+        "Sendblue-Basis für den Typing-Indicator (beachte: .com, nicht .co)."
+      required: false
+      default: "https://api.sendblue.com"
+
+    - key: "allowlist"
+      type: "string"
+      label: "Zugelassene Nummern (optional)"
+      help:
+        "Komma-getrennte Telefonnummern (E.164, z.B. +491701234567), die mit dem
+        Bot chatten dürfen. Leer = alle erlaubt."
+      required: false
+      default: ""
+
+  self_test: false
+
+# ---------------------------------------------------------------------------
+# Permissions. No memory / graph access — the dedupe set is in-process only.
+# network.outbound lists the two Sendblue API hosts (send-message lives on
+# api.sendblue.co, the typing indicator on api.sendblue.com).
+# ---------------------------------------------------------------------------
+permissions:
+  memory:
+    reads: []
+    writes: []
+  graph:
+    reads: []
+    writes: []
+  network:
+    outbound:
+      - "api.sendblue.co"
+      - "api.sendblue.com"
+  filesystem:
+    scratch: false
+
+# ---------------------------------------------------------------------------
+# Admin UI (generic plugin surface, not channel-specific). web-ui embeds this
+# path as an iframe on the plugin detail page (because the manifest
+# declares admin_ui_path). Shows channel status, the configured Sendblue
+# line, the receive-webhook URL to register in the Sendblue dashboard, and
+# whether authenticated deliveries are arriving.
+# ---------------------------------------------------------------------------
+admin_ui_path: "/api/imessage-channel/admin/index.html"
+
+# ---------------------------------------------------------------------------
+# Channel block (schema section 14). Sendblue delivers inbound messages via a
+# public webhook the plugin mounts through CoreApi.registerRouter under
+# /api/imessage. The route below is descriptive (operator summary); the
+# actual mount happens at activate(). verify_signature stays false — Sendblue
+# has no HMAC signing; the plugin verifies a shared secret carried in the URL
+# path (or any request header) instead, timing-safe.
+#
+# channel_type: declared here for documentation/forward-compat. NOTE: the
+# current host manifestLoader (extractChannelBlock) does not yet copy this
+# field into the catalog, and the id "@omadia/channel-imessage" has no dot
+# segments to derive "imessage" from — so the plugin ALSO sets
+# turn.channelType = 'imessage' explicitly on every IncomingTurn, which is
+# authoritative for US7 binding routing either way.
+# ---------------------------------------------------------------------------
+channel:
+  channel_type: "imessage"
+  transport:
+    kind: "webhook"
+    routes:
+      - path: "/api/imessage/webhook/:token"
+        method: "POST"
+    verify_signature: false
+  capabilities:
+    - "text"
+    - "typing_indicator"
+  adapters:
+    - "text"
