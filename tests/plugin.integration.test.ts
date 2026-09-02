@@ -295,11 +295,16 @@ describe('plugin.activate — answer-link round trip', () => {
       scriptedAnswers = [CHOICE_ANSWER, { text: 'Di ist gebucht.' }];
 
       await postWebhook(h.base, SECRET, inbound({ content: 'Buche einen Slot' }));
-      await waitFor(() => h.sends.length === 1, 'choice bubble');
+      await waitFor(() => h.sends.length === 2, 'choice text bubble + link bubble');
 
-      const bubble = String(h.sends[0]?.body.content);
-      const match = /https:\/\/omadia\.example\.com\/api\/imessage\/a\/([A-Za-z0-9_-]+)/.exec(bubble);
-      assert.ok(match, `bubble must carry the answer link, got:\n${bubble}`);
+      // Two bubbles, in order: the self-sufficient text (no URL inside), then
+      // the bare URL so iMessage can unfurl it into a preview card.
+      const text = String(h.sends[0]?.body.content);
+      assert.ok(text.includes('• Di 10:00'), `text bubble must list the options, got:\n${text}`);
+      assert.ok(!text.includes('http'), 'text bubble must not embed the URL');
+      const link = String(h.sends[1]?.body.content);
+      const match = /^https:\/\/omadia\.example\.com\/api\/imessage\/a\/([A-Za-z0-9_-]+)$/.exec(link);
+      assert.ok(match, `second bubble must be exactly the answer link, got:\n${link}`);
       const token = match![1]!;
 
       // The fallback page is up and side-effect free.
@@ -314,11 +319,11 @@ describe('plugin.activate — answer-link round trip', () => {
         body: JSON.stringify({ value: 'slot-di' }),
       });
       assert.equal(reply.status, 202);
-      await waitFor(() => h.sends.length === 2, 'follow-up bubble');
+      await waitFor(() => h.sends.length === 3, 'follow-up bubble');
 
       assert.equal(h.chatCalls[1]?.userMessage, 'slot-di');
       assert.equal(h.chatCalls[1]?.sessionScope, `imessage:${SENDER}`);
-      assert.equal(h.sends[1]?.body.content, 'Di ist gebucht.');
+      assert.equal(h.sends[2]?.body.content, 'Di ist gebucht.');
 
       // The link is single-use.
       const second = await fetch(`${h.base}/answers/${token}/reply`, {
@@ -338,12 +343,12 @@ describe('plugin.activate — answer-link round trip', () => {
       scriptedAnswers = [CHOICE_ANSWER, { text: 'Ok!' }];
 
       await postWebhook(h.base, SECRET, inbound({ content: 'Buche einen Slot' }));
-      await waitFor(() => h.sends.length === 1, 'choice bubble');
-      const token = /\/a\/([A-Za-z0-9_-]+)/.exec(String(h.sends[0]?.body.content))![1]!;
+      await waitFor(() => h.sends.length === 2, 'choice text bubble + link bubble');
+      const token = /\/a\/([A-Za-z0-9_-]+)/.exec(String(h.sends[1]?.body.content))![1]!;
 
       // The user answers in iMessage — the pending link must 409 afterwards.
       await postWebhook(h.base, SECRET, inbound({ content: 'Di 10:00' }));
-      await waitFor(() => h.sends.length === 2, 'text-reply turn');
+      await waitFor(() => h.sends.length === 3, 'text-reply turn');
 
       const late = await fetch(`${h.base}/answers/${token}/reply`, {
         method: 'POST',

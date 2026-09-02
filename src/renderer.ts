@@ -25,13 +25,26 @@ export interface RenderOptions {
  * Phase 1) — see {@link RenderOptions.choiceLinkUrl}.
  */
 export function renderAnswer(a: SemanticAnswer, opts?: RenderOptions): string {
+  return renderAnswerBubbles(a, opts).join('\n\n');
+}
+
+/**
+ * Render into the ordered list of iMessage bubbles to send. Normally one
+ * bubble; a choice card WITH an answer link yields two — the text, then the
+ * bare URL on its own. iMessage only unfurls a link into a preview card when
+ * the message consists of nothing but the URL; embedded in text it stays an
+ * inline link. The text bubble stays self-sufficient (options listed), so a
+ * failed second send still leaves an answerable question.
+ */
+export function renderAnswerBubbles(a: SemanticAnswer, opts?: RenderOptions): string[] {
   const parts: string[] = [];
 
   const body = mdToPlainText(a.text).trim();
   if (body) parts.push(body);
 
+  const linkUrl = a.interactive?.kind === 'choice' ? opts?.choiceLinkUrl : undefined;
   if (a.interactive?.kind === 'choice') {
-    parts.push(renderChoice(a.interactive, opts?.choiceLinkUrl));
+    parts.push(renderChoice(a.interactive, Boolean(linkUrl)));
   }
 
   const links = renderAttachments(a.attachments);
@@ -43,7 +56,10 @@ export function renderAnswer(a: SemanticAnswer, opts?: RenderOptions): string {
 
   if (a.disclaimer) parts.push(a.disclaimer);
 
-  return parts.join('\n\n');
+  const text = parts.join('\n\n');
+  const bubbles = text.trim().length > 0 ? [text] : [];
+  if (linkUrl) bubbles.push(linkUrl);
+  return bubbles;
 }
 
 /**
@@ -212,13 +228,13 @@ function formatTable(t: ParsedTable): string {
   return blocks.join('\n\n');
 }
 
-function renderChoice(choice: OutgoingChoiceCard, linkUrl?: string): string {
+function renderChoice(choice: OutgoingChoiceCard, hasLink: boolean): string {
   const lines = [choice.question];
   if (choice.rationale) lines.push(choice.rationale);
   for (const opt of choice.options) lines.push(`• ${opt.label}`);
-  if (linkUrl) {
+  if (hasLink) {
+    // The URL itself follows as its own bubble (see renderAnswerBubbles).
     lines.push('Antworte mit einer der Optionen — oder wähle hier aus:');
-    lines.push(linkUrl);
   } else {
     lines.push('Bitte antworte mit einer der Optionen.');
   }

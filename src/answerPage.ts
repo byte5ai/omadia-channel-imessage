@@ -46,6 +46,11 @@ export interface AnswerPageView {
   /** Optional deep-link URL for an "open in app" button; null/undefined hides
    *  it. Reserved — no consumer today (the mobile app registers no scheme). */
   appUrl?: string | null;
+  /** Absolute URL of this page → `og:url`. Null omits the tag. */
+  pageUrl?: string | null;
+  /** Absolute URL of the 1200×630 JPEG banner → `og:image`. Null omits the
+   *  image tags; iMessage then renders the small title-only card. */
+  imageUrl?: string | null;
 }
 
 export function renderAnswerPage(view: AnswerPageView): string {
@@ -84,6 +89,19 @@ export function renderAnswerPage(view: AnswerPageView): string {
       ? `<a class="btn btn-secondary" href="${escapeAttr(view.appUrl)}">In der Omadia-App öffnen</a>`
       : '';
 
+  const ogExtra = [
+    view.pageUrl ? `<meta property="og:url" content="${escapeAttr(view.pageUrl)}">` : '',
+    view.imageUrl
+      ? `<meta property="og:image" content="${escapeAttr(view.imageUrl)}">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
   return `<!doctype html>
 <html lang="de">
 <head>
@@ -95,6 +113,7 @@ export function renderAnswerPage(view: AnswerPageView): string {
 <meta property="og:title" content="${escapeAttr(ogTitle)}">
 <meta property="og:description" content="Antwort-Auswahl · Omadia">
 <meta property="og:type" content="website">
+${ogExtra}
 <title>Omadia · Antwort</title>
 <style>
   /* ---- Lume tokens (spec §2), Lagoon palette, light values ---------------- */

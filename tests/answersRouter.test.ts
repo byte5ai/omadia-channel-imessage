@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import type { Server } from 'node:http';
+import path from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import express from 'express';
@@ -38,6 +39,8 @@ before(async () => {
     createAnswersRouter({
       store,
       routePrefix: '/api/imessage',
+      publicBaseUrl: 'https://omadia.example.com/',
+      ogAssetsPath: path.resolve(process.cwd(), 'assets/og'),
       log: () => undefined,
       onReply: async (entry, option) => {
         replies.push({ entry, option });
@@ -217,5 +220,99 @@ describe('maskPhone', () => {
   it('masks down to prefix and trailing digits', () => {
     assert.equal(maskPhone('+491701234567'), '+49 … 67');
     assert.equal(maskPhone('0170'), '…');
+  });
+});
+
+describe('GET /a/:token — link-preview (Open Graph) tags', () => {
+  it('carries og:url and the og:image banner with absolute URLs', async () => {
+    const entry = store.create('+491701234567', CHOICE);
+    const html = await (await fetch(`${base}/a/${entry.token}`)).text();
+    assert.ok(html.includes('<meta property="og:title" content="Welcher &lt;Slot&gt; &amp; wann?">'));
+    assert.ok(
+      html.includes(
+        `<meta property="og:url" content="https://omadia.example.com/api/imessage/a/${entry.token}">`,
+      ),
+      'og:url must be absolute and point at the page itself (trailing slash of the origin trimmed)',
+    );
+    assert.ok(
+      html.includes(
+        '<meta property="og:image" content="https://omadia.example.com/api/imessage/a/assets/preview.jpg">',
+      ),
+    );
+    assert.ok(html.includes('<meta property="og:image:width" content="1200">'));
+    assert.ok(html.includes('<meta property="og:image:height" content="630">'));
+  });
+
+  it('serves the banner as image/jpeg, cacheable, without touching /a/:token', async () => {
+    const res = await fetch(`${base}/a/assets/preview.jpg`);
+    assert.equal(res.status, 200);
+    assert.ok((res.headers.get('content-type') ?? '').startsWith('image/jpeg'));
+    assert.equal(res.headers.get('cache-control'), 'public, max-age=86400');
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    assert.ok(bytes.length > 1000, 'banner must be a real file, not a 404 page');
+    assert.deepEqual([...bytes.slice(0, 3)], [0xff, 0xd8, 0xff], 'JPEG magic');
+  });
+
+  it('serves the banner from a dot-directory (core installs under .uploaded-packages/)', async () => {
+    const { mkdtempSync, mkdirSync, copyFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const dotRoot = path.join(mkdtempSync(path.join(tmpdir(), 'omadia-')), '.uploaded-packages', 'og');
+    mkdirSync(dotRoot, { recursive: true });
+    copyFileSync(path.resolve(process.cwd(), 'assets/og/preview.jpg'), path.join(dotRoot, 'preview.jpg'));
+
+    const app = express();
+    app.use(
+      '/api/imessage',
+      createAnswersRouter({
+        store: new AnswerStore({ ttlMs: HOUR, now: () => nowMs }),
+        routePrefix: '/api/imessage',
+        publicBaseUrl: 'https://omadia.example.com',
+        ogAssetsPath: dotRoot,
+        log: () => undefined,
+        onReply: async () => undefined,
+      }),
+    );
+    const srv = app.listen(0);
+    await new Promise<void>((resolve) => srv.once('listening', resolve));
+    try {
+      const addr = srv.address();
+      if (addr === null || typeof addr === 'string') throw new Error('no port');
+      const res = await fetch(`http://127.0.0.1:${addr.port}/api/imessage/a/assets/preview.jpg`);
+      assert.equal(res.status, 200, 'sendFile without root 404s on dot segments — regression guard');
+      assert.ok((res.headers.get('content-type') ?? '').startsWith('image/jpeg'));
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('omits og:url / og:image when no public base URL is configured', async () => {
+    const app = express();
+    const bare = new AnswerStore({ ttlMs: HOUR, now: () => nowMs });
+    app.use(
+      '/api/imessage',
+      createAnswersRouter({
+        store: bare,
+        routePrefix: '/api/imessage',
+        log: () => undefined,
+        onReply: async () => undefined,
+      }),
+    );
+    const srv = app.listen(0);
+    await new Promise<void>((resolve) => srv.once('listening', resolve));
+    try {
+      const addr = srv.address();
+      if (addr === null || typeof addr === 'string') throw new Error('no port');
+      const entry = bare.create('+491701234567', CHOICE);
+      const html = await (
+        await fetch(`http://127.0.0.1:${addr.port}/api/imessage/a/${entry.token}`)
+      ).text();
+      assert.ok(html.includes('og:title'));
+      assert.ok(!html.includes('og:url'));
+      assert.ok(!html.includes('og:image'));
+      const img = await fetch(`http://127.0.0.1:${addr.port}/api/imessage/a/assets/preview.jpg`);
+      assert.equal(img.status, 404);
+    } finally {
+      srv.close();
+    }
   });
 });

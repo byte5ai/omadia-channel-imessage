@@ -22,7 +22,7 @@ import {
   type ChannelDirectoryRegistryShim,
 } from './channelKeyDirectory.js';
 import { createLruSet, evaluateInbound, normalizePhone } from './inbound.js';
-import { renderAnswer } from './renderer.js';
+import { renderAnswerBubbles } from './renderer.js';
 import { SendblueClient } from './sendblueClient.js';
 import { createChannelState, patchState, type ChannelState } from './state.js';
 import { verifyWebhookAuth, type HeaderBag } from './verify.js';
@@ -152,6 +152,8 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       store: answerStore,
       routePrefix: ROUTE_PREFIX,
       returnNumber: fromNumber,
+      publicBaseUrl: links?.publicBaseUrl ?? null,
+      ogAssetsPath: path.resolve(here, '../assets/og'),
       log: (level, msg, data) => core.log(level, msg, data),
       onReply: async (entry, option) => {
         const replyTurn: IncomingTurn = {
@@ -288,9 +290,14 @@ async function handleTurn(
       const entry = links.store.create(turn.conversationId, answer.interactive);
       choiceLinkUrl = `${links.publicBaseUrl}${ROUTE_PREFIX}/a/${entry.token}`;
     }
-    const text = renderAnswer(answer, choiceLinkUrl ? { choiceLinkUrl } : undefined);
-    if (text.trim().length === 0) return;
-    await client.sendMessage({ number: turn.conversationId, content: text });
+    const bubbles = renderAnswerBubbles(answer, choiceLinkUrl ? { choiceLinkUrl } : undefined);
+    if (bubbles.length === 0) return;
+    // Sequential on purpose: the bare-URL bubble (link preview card) has to
+    // land after the text. Sendblue accepts sends asynchronously, so awaiting
+    // the 2xx of the first is the best ordering guarantee available.
+    for (const content of bubbles) {
+      await client.sendMessage({ number: turn.conversationId, content });
+    }
     // A successful send clears a previously surfaced send error.
     if (state.lastError) patchState(state, { lastError: null });
   } catch (err) {

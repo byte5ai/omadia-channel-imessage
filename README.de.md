@@ -119,11 +119,20 @@ im Browser zu stranden. Die Seite folgt der Lume-Designsprache von omadia; die
 Tokens liegen als Kopie in der Datei, weil sie ohne externe Assets ausgeliefert
 wird.
 
+**Link-Preview.** Der Antwort-Link geht als zweite Bubble raus, die nur die
+URL enthält — iMessage macht aus einem Link nur dann eine Preview-Card, wenn die
+Nachricht ausschließlich aus der URL besteht. Die Fallback-Seite liefert
+`og:title` (die Frage), `og:url` und ein statisches `og:image`-Banner, die
+Card zeigt also die Frage über einem Omadia-Banner. Ob die Card tatsächlich
+erscheint, hängt davon ab, ob der sendende Relay die Preview erzeugt (oder das
+Empfänger-Gerät sie nachlädt); die Text-Bubble bleibt in jedem Fall vollständig.
+
 Routen (auf demselben öffentlichen Router wie das Webhook):
 
 | Route | Zweck |
 | --- | --- |
 | `GET /api/imessage/a/:token` | HTML-Fallback-Seite (zugleich OG-Preview-Ziel). |
+| `GET /api/imessage/a/assets/preview.jpg` | Statisches 1200×630-Banner, referenziert als `og:image`. |
 | `GET /api/imessage/answers/:token` | Strukturierter JSON-Payload (API-Clients; ein Mobile-App-Handoff ist noch nicht angebunden). |
 | `POST /api/imessage/answers/:token/reply` | Nimmt `{ "value": … }` an; `202`, Turn läuft detached. |
 

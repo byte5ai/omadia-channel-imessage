@@ -15,7 +15,7 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.2.4" # === package.json "version"
+  version: "0.2.9" # === package.json "version"
   description:
     "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
     Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link
@@ -313,6 +313,8 @@ channel:
       # Answer links (deep-link Phase 1) — public capability URLs; the token
       # itself is the authorization (delivered only via iMessage).
       - path: "/api/imessage/a/:token"
+        method: "GET"
+      - path: "/api/imessage/a/assets/preview.jpg"
         method: "GET"
       - path: "/api/imessage/answers/:token"
         method: "GET"

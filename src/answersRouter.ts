@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import express, { Router } from 'express';
 
 import { renderAnswerPage } from './answerPage.js';
@@ -9,6 +11,7 @@ import type { AnswerEntry, AnswerStore } from './answerStore.js';
  * Sendblue webhook), so all paths below are relative to `/api/imessage`:
  *
  *   GET  /a/:token              HTML fallback page (also the OG-preview target)
+ *   GET  /a/assets/preview.jpg  static og:image banner for the link card
  *   GET  /answers/:token        structured JSON payload (API clients)
  *   POST /answers/:token/reply  accept the selection, drive the turn detached
  *
@@ -27,6 +30,12 @@ export interface AnswersRouterDeps {
    *  the thread, unlike `entry.conversationId` (the recipient's own number).
    *  Omitted → the page falls back to a written "go back" instruction. */
   returnNumber?: string | null;
+  /** Public HTTPS origin (`public_base_url`), used for the absolute
+   *  `og:url` / `og:image` tags. Null → those tags are omitted. */
+  publicBaseUrl?: string | null;
+  /** Directory holding the bundled `assets/og` files (preview banner).
+   *  Omitted → no og:image and the asset route 404s. */
+  ogAssetsPath?: string;
   /**
    * Drive one orchestrator turn for an accepted reply. Called DETACHED after
    * the 202 — an orchestrator turn can take longer than any sane HTTP
@@ -42,6 +51,30 @@ export interface AnswersRouterDeps {
 
 export function createAnswersRouter(deps: AnswersRouterDeps): Router {
   const router = Router();
+  const origin = deps.publicBaseUrl ? deps.publicBaseUrl.replace(/\/+$/, '') : null;
+  const imageUrl =
+    origin && deps.ogAssetsPath ? `${origin}${deps.routePrefix}/a/assets/preview.jpg` : null;
+
+  // Static banner for the iMessage link card (og:image). Lives under /a/ on
+  // purpose: the core's public-path exemption covers exactly webhook|a|answers.
+  // No clash with /a/:token — Express 5 params match a single segment only.
+  //
+  // `root` is REQUIRED here, not cosmetic: without it `send` applies its
+  // dotfiles check to the whole absolute path, and the core installs uploaded
+  // packages under `.uploaded-packages/…` — every segment starting with a
+  // dot → 404 (NotFoundError from send, file present). With `root` only the
+  // relative part is checked.
+  router.get('/a/assets/preview.jpg', (_req, res) => {
+    if (!deps.ogAssetsPath) {
+      res.status(404).end();
+      return;
+    }
+    res.sendFile('preview.jpg', {
+      root: path.resolve(deps.ogAssetsPath),
+      maxAge: 24 * 60 * 60 * 1000,
+      immutable: false,
+    });
+  });
 
   router.get('/a/:token', (req, res) => {
     const token = String((req.params as Record<string, string>)['token'] ?? '');
@@ -56,6 +89,8 @@ export function createAnswersRouter(deps: AnswersRouterDeps): Router {
           entry,
           replyPath: `${deps.routePrefix}/answers/${encodeURIComponent(token)}/reply`,
           returnNumber: deps.returnNumber ?? null,
+          pageUrl: origin ? `${origin}${deps.routePrefix}/a/${encodeURIComponent(token)}` : null,
+          imageUrl,
           appUrl: null,
         }),
       );

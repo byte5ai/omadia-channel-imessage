@@ -1,6 +1,6 @@
 {
   "name": "@omadia/channel-imessage",
-  "version": "0.2.4",
+  "version": "0.2.9",
   "private": true,
   "type": "module",
   "main": "dist/plugin.js",

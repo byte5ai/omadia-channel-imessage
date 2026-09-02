@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import type { SemanticAnswer } from '@omadia/channel-sdk';
 
-import { mdToPlainText, renderAnswer } from '../src/renderer.js';
+import { mdToPlainText, renderAnswer, renderAnswerBubbles } from '../src/renderer.js';
 
 // Acceptance criterion (#410): headings, tables, bullets, links, code render
 // per spec with NO raw markdown leakage in the resulting iMessage text.
@@ -137,6 +137,42 @@ describe('renderAnswer — SemanticAnswer degradation', () => {
     assert.ok(out.includes('oder wähle hier aus:'));
     assert.ok(out.includes(url));
     assert.ok(!out.includes('Bitte antworte mit einer der Optionen.'));
+  });
+
+  it('splits a linked choice into a text bubble and a bare-URL bubble', () => {
+    const url = 'https://omadia.example.com/api/imessage/a/tok123';
+    const bubbles = renderAnswerBubbles(
+      answer({
+        interactive: {
+          kind: 'choice',
+          question: 'Welcher Slot?',
+          options: [{ label: 'Di', value: 'a' }],
+        },
+      }),
+      { choiceLinkUrl: url },
+    );
+    assert.equal(bubbles.length, 2);
+    // Text bubble is self-sufficient and carries no URL — the preview card
+    // only renders when the URL is the whole message.
+    assert.ok(bubbles[0]!.includes('• Di'));
+    assert.ok(bubbles[0]!.includes('oder wähle hier aus:'));
+    assert.ok(!bubbles[0]!.includes('http'));
+    assert.equal(bubbles[1], url);
+  });
+
+  it('yields a single bubble without a link, and none for an empty answer', () => {
+    const one = renderAnswerBubbles(
+      answer({
+        interactive: { kind: 'choice', question: 'Q?', options: [{ label: 'A', value: 'a' }] },
+      }),
+    );
+    assert.equal(one.length, 1);
+    assert.ok(one[0]!.includes('Bitte antworte mit einer der Optionen.'));
+    // choiceLinkUrl without a choice card is ignored — no stray URL bubble.
+    assert.deepEqual(renderAnswerBubbles(answer({ text: 'Nur Text.' }), { choiceLinkUrl: 'https://x' }), [
+      'Nur Text.',
+    ]);
+    assert.deepEqual(renderAnswerBubbles(answer({ text: '   ' })), []);
   });
 
   it('renders follow-ups (max 5) and the disclaimer', () => {
