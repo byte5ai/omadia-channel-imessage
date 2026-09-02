@@ -43,6 +43,27 @@ describe('mdToPlainText — headings, quotes, lists', () => {
     assert.ok(out.includes('• drei'));
     assert.ok(out.includes('  • eingerückt'));
   });
+
+  it('drops the checkbox of task items but keeps a bare [ ] in prose', () => {
+    assert.equal(
+      mdToPlainText('- [ ] Test ToDo\n* [ ] zwei\n  - [ ] eingerückt\n1. [ ] nummeriert'),
+      '• Test ToDo\n• zwei\n  • eingerückt\n1. nummeriert',
+    );
+    assert.equal(mdToPlainText('- [x] erledigt\n- [X] auch'), '• ✓ erledigt\n• ✓ auch');
+    assert.equal(mdToPlainText('[ ] Test ToDo'), '[ ] Test ToDo');
+    assert.equal(mdToPlainText('Siehe [ ] im Text'), 'Siehe [ ] im Text');
+  });
+
+  it('treats a code span holding just the checkbox as a task item (observed model output)', () => {
+    // Raw answer seen on device: the model wrapped every box in backticks.
+    assert.equal(
+      mdToPlainText('- `[x]` Umzugsunternehmen buchen\n- `[ ]` Kisten packen\n1. `[ ]` Adresse melden'),
+      '• ✓ Umzugsunternehmen buchen\n• Kisten packen\n1. Adresse melden',
+    );
+    // Not a task item: box in code but no list marker, or code holding more than the box.
+    assert.equal(mdToPlainText('`[ ] Test ToDo`'), '[ ] Test ToDo');
+    assert.equal(mdToPlainText('- `- [ ]` Syntax-Demo'), '• - [ ] Syntax-Demo');
+  });
 });
 
 describe('mdToPlainText — code shelter', () => {
@@ -55,6 +76,44 @@ describe('mdToPlainText — code shelter', () => {
   it('keeps inline code verbatim (markup inside is not transformed)', () => {
     const out = mdToPlainText('Nutze `--flag *glob*` dafür');
     assert.equal(out, 'Nutze --flag *glob* dafür');
+  });
+
+  it('handles multi-backtick code spans (CommonMark) and strips the space padding', () => {
+    // Observed on device: the model wrote `` `Text` `` to show a backtick
+    // literally; the old single-backtick regex left stray ticks behind.
+    assert.equal(mdToPlainText('Code: `` `Text` ``'), 'Code: `Text`');
+    assert.equal(mdToPlainText('Code: `` ` Text ` ``'), 'Code: ` Text `');
+    assert.equal(mdToPlainText('` `'), ' ');
+  });
+
+  it('keeps backslash escapes inside code verbatim', () => {
+    assert.equal(mdToPlainText('`a\\*b` bleibt'), 'a\\*b bleibt');
+  });
+
+  it('leaves markdown syntax that the model shows in inline code literal', () => {
+    const out = mdToPlainText('- Fett: `**Text**` oder `__Text__`\n- Kursiv: `*Text*` oder `_Text_`');
+    assert.equal(out, '• Fett: **Text** oder __Text__\n• Kursiv: *Text* oder _Text_');
+  });
+});
+
+describe('mdToPlainText — escapes, thematic breaks, multi-line emphasis', () => {
+  it('resolves backslash escapes to the literal character', () => {
+    assert.equal(mdToPlainText('Fett: \\*\\*Text\\*\\*'), 'Fett: **Text**');
+    assert.equal(mdToPlainText('Preis \\$5 und \\# kein Heading'), 'Preis $5 und # kein Heading');
+    assert.equal(mdToPlainText('\\`kein code\\`'), '`kein code`');
+  });
+
+  it('turns thematic breaks into a blank line (before list/emphasis handling)', () => {
+    assert.equal(mdToPlainText('Text\n\n---\n\nMehr'), 'Text\n\nMehr');
+    assert.equal(mdToPlainText('Text\n\n* * *\n\nMehr'), 'Text\n\nMehr');
+    assert.equal(mdToPlainText('Text\n\n___\n\nMehr'), 'Text\n\nMehr');
+    assert.ok(!mdToPlainText('- - -\nx').includes('•'));
+  });
+
+  it('strips emphasis that wraps across a line break but not across a blank line', () => {
+    assert.equal(mdToPlainText('Zeile mit **fett\nüber Zeilen** hinweg'), 'Zeile mit fett\nüber Zeilen hinweg');
+    assert.equal(mdToPlainText('Absatz **offen\n\nneu** hier'), 'Absatz **offen\n\nneu** hier');
+    assert.equal(mdToPlainText('a ** b ** c'), 'a ** b ** c');
   });
 });
 

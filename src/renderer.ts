@@ -68,9 +68,12 @@ export function renderAnswerBubbles(a: SemanticAnswer, opts?: RenderOptions): st
  * raw markdown syntax: emphasis/code markers are stripped (not converted),
  * links become `label (url)`, headings become UPPERCASE lines set off by
  * blank lines (whitespace is the only layout tool a bubble has), blockquotes
- * become `» ` lines, list markers become `•`, and GFM tables are flipped to
- * per-row key/value stacks (the mobile-friendly pattern the Telegram channel
- * uses — a monospace grid is impossible without monospace).
+ * become `» ` lines, list markers become `•` (task checkboxes dropped, done
+ * items keep a ✓), thematic breaks (`---`) become
+ * a blank line, backslash escapes resolve to their literal character, and
+ * GFM tables are flipped to per-row key/value stacks (the mobile-friendly
+ * pattern the Telegram channel uses — a monospace grid is impossible without
+ * monospace).
  */
 export function mdToPlainText(md: string): string {
   // Shelter code from every transform below: fenced blocks and inline code
@@ -84,22 +87,46 @@ export function mdToPlainText(md: string): string {
     .replace(/```[^\n]*\n([\s\S]*?)```/g, (_m, code: string) => stash(code.replace(/\n$/, '')))
     // unmatched leftover fence line (truncated block): drop the fence line
     .replace(/^```[^\n]*\n?/gm, '')
-    // `inline code` → inline code
-    .replace(/`([^`\n]+)`/g, (_m, code: string) => stash(code));
+    // GFM task items: the checkbox after a list marker is dropped (`• [ ]`
+    // is noise in a bubble); a checked box keeps a ✓ so done-state survives.
+    // Models often wrap the box in backticks (`- \`[x]\` Kisten`), so a code
+    // span holding exactly the box counts too — hence this runs BEFORE the
+    // inline-code shelter. A bare `[ ]` without list marker is prose and stays.
+    .replace(/^(\s*(?:[-*+]|\d+[.)])\s+)(`?)\[( |[xX])\]\2\s+/gm, (_m, lead: string, _tick: string, mark: string) =>
+      mark === ' ' ? lead : `${lead}✓ `)
+    // \` → literal backtick; sheltered BEFORE code-span detection so an
+    // escaped backtick can never open a span (CommonMark: escapes win)
+    .replace(/\\`/g, () => stash('`'))
+    // code spans per CommonMark: a run of n backticks closes with a run of
+    // exactly n, so `` `Text` `` yields `Text` with the inner backticks kept.
+    // One leading AND trailing space is stripped (the padding convention).
+    .replace(/(`+)([^\n]*?[^`\n])\1(?!`)/g, (_m, _ticks: string, code: string) =>
+      stash(/^ .* $/.test(code) ? code.slice(1, -1) : code))
+    // remaining backslash escapes (\* \_ \# …) → the literal character,
+    // sheltered so the emphasis/heading transforms below never see it
+    .replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, (_m, ch: string) => stash(ch));
 
   // GFM tables → per-row key/value stacks (before emphasis stripping, so
   // cell contents get the same cleanup afterwards).
   text = renderTables(text);
 
+  // Emphasis may span lines but never a blank line (a paragraph boundary),
+  // and the markers must hug non-space so prose math (`2 * 3`) survives.
+  const emphasis = (open: string, close = open, inner = '[\\s\\S]'): RegExp =>
+    new RegExp(`${open}((?=\\S)(?:(?!\\n\\n)${inner})+?(?<=\\S))${close}`, 'g');
+
   text = text
+    // thematic break (--- / *** / ___, optionally spaced) → blank line; must
+    // run before list markers (`- - -`) and emphasis (`*****`) see it
+    .replace(/^ {0,3}([-*_])(?: *\1){2,} *$/gm, '')
     // **bold** / __bold__ / ~~strike~~ → bare text
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/__(.+?)__/g, '$1')
-    .replace(/~~(.+?)~~/g, '$1')
-    // *italic* — asterisks must hug non-space so prose math (`2 * 3`) survives
-    .replace(/\*(\S(?:[^*\n]*\S)?)\*/g, '$1')
+    .replace(emphasis('\\*\\*'), '$1')
+    .replace(emphasis('__'), '$1')
+    .replace(emphasis('~~'), '$1')
+    // *italic*
+    .replace(emphasis('\\*', '\\*', '[^*]'), '$1')
     // _italic_ — word-internal underscores (snake_case) survive
-    .replace(/(?<![\w_])_(\S(?:[^_\n]*\S)?)_(?![\w_])/g, '$1')
+    .replace(emphasis('(?<![\\w_])_', '_(?![\\w_])', '[^_]'), '$1')
     // [label](url) → label (url); the url is sheltered so the heading
     // uppercasing below can never mangle a case-sensitive path
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) => `${label} (${stash(url)})`)
