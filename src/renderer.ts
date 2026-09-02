@@ -5,6 +5,13 @@ import type {
   SemanticAnswer,
 } from '@omadia/channel-sdk';
 
+export interface RenderOptions {
+  /** Absolute answer-link URL for a choice card. When set, the rendered
+   *  choice invites a tap on the link (native/web selection UI) while the
+   *  text options stay listed — replying by text always keeps working. */
+  choiceLinkUrl?: string;
+}
+
 /**
  * Render the orchestrator's channel-agnostic {@link SemanticAnswer} into a
  * single iMessage text message.
@@ -14,15 +21,17 @@ import type {
  * choice card becomes a "reply with one of these" list, follow-ups become
  * copyable suggestions, and attachments become links. This matches the SDK's
  * documented graceful-degradation contract for connectors without rich UI.
+ * A choice card can additionally carry an answer link (deep-link concept
+ * Phase 1) — see {@link RenderOptions.choiceLinkUrl}.
  */
-export function renderAnswer(a: SemanticAnswer): string {
+export function renderAnswer(a: SemanticAnswer, opts?: RenderOptions): string {
   const parts: string[] = [];
 
   const body = mdToPlainText(a.text).trim();
   if (body) parts.push(body);
 
   if (a.interactive?.kind === 'choice') {
-    parts.push(renderChoice(a.interactive));
+    parts.push(renderChoice(a.interactive, opts?.choiceLinkUrl));
   }
 
   const links = renderAttachments(a.attachments);
@@ -203,11 +212,16 @@ function formatTable(t: ParsedTable): string {
   return blocks.join('\n\n');
 }
 
-function renderChoice(choice: OutgoingChoiceCard): string {
+function renderChoice(choice: OutgoingChoiceCard, linkUrl?: string): string {
   const lines = [choice.question];
   if (choice.rationale) lines.push(choice.rationale);
   for (const opt of choice.options) lines.push(`• ${opt.label}`);
-  lines.push('Bitte antworte mit einer der Optionen.');
+  if (linkUrl) {
+    lines.push('Antworte mit einer der Optionen — oder wähle hier aus:');
+    lines.push(linkUrl);
+  } else {
+    lines.push('Bitte antworte mit einer der Optionen.');
+  }
   return lines.join('\n');
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@omadia/channel-imessage",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "main": "dist/plugin.js",
@@ -14,7 +14,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-zip.mjs",
-    "clean": "rm -rf dist out"
+    "test": "node scripts/test.mjs",
+    "clean": "rm -rf dist out .test-build"
   },
   "peerDependencies": {
     "@omadia/channel-sdk": "*",

@@ -61,16 +61,76 @@ It needs an LLM provider assigned to the orchestrator first.
 | `api_base_url` | Default `https://api.sendblue.co` (send-message). |
 | `api_v2_base_url` | Default `https://api.sendblue.com` (typing indicator — note `.com`). |
 | `allowlist` | Optional comma-separated E.164 numbers; empty = everyone. |
+| `public_base_url` | Optional public HTTPS origin of the omadia instance. Enables **answer links** (see below); empty = disabled. |
+| `answer_link_ttl_hours` | How long an answer link stays answerable. Default `24`. |
+
+## Answer links (interactive choices)
+
+iMessage cannot render choice buttons. With `public_base_url` set, an answer
+carrying an interactive choice card additionally includes a capability URL:
+
+```
+https://<public_base_url>/api/imessage/a/<token>
+```
+
+Tapping it opens a self-contained selection page in the browser; the pick is
+POSTed back and injected into the **same iMessage conversation session** — the next
+answer arrives in iMessage as usual. Replying by text always keeps working;
+a text reply invalidates the pending link (a later tap shows "already
+answered"). The token is 128-bit random, single-use, TTL-bound, and the only
+authorization (it is delivered exclusively to the recipient's number). `GET`
+is side-effect free, so Apple's link-preview crawler can never answer.
+
+Routes (mounted on the same public router as the webhook):
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/imessage/a/:token` | HTML fallback page (also the OG-preview target). |
+| `GET /api/imessage/answers/:token` | Structured JSON payload (API clients; a mobile-app handoff is not wired yet). |
+| `POST /api/imessage/answers/:token/reply` | Accept `{ "value": … }`; `202`, then the turn runs detached. |
+
+## Agent binding (operator channels dashboard)
+
+The plugin contributes its configured line to the operator channels dashboard
+(`GET /api/v1/operator/channels`), so the line is a pickable binding key.
+Binding an Agent to the **line** (`from_number`) makes it the default for every
+conversation on that line; a binding on a specific **sender E.164** wins over
+it. Unbound conversations fall back to the platform fallback Agent, then to the
+default orchestrator.
+
+## Privacy & data transit
+
+> ⚠️ **All message content transits Sendblue's infrastructure** — both
+> directions, including attachments (inbound media is fetched by the
+> orchestrator from Sendblue-hosted URLs). Sendblue is a third-party relay and
+> **not an Apple-sanctioned API**; Apple could disrupt relays at any time.
+
+Treat the channel as **opt-in**: enable it deliberately, inform the people who
+will text the line that a relay provider processes the content, and use the
+`allowlist` to keep the audience explicit. omadia's outbound privacy-guard
+masking applies to iMessage exactly as to every other external channel — it
+runs in the orchestrator's answer path, before this plugin renders and sends.
+
+Webhook-secret handling: the secret rides as the last URL path segment, which
+can surface in intermediary access logs (reverse proxies, load balancers). If
+Sendblue's dashboard offers a webhook-secret **header** field, set the same
+token there too — the plugin accepts the secret from any request header and
+the path segment then never needs to appear in logs you don't control.
+Answer-link tokens are 128-bit random, single-use, TTL-bound capability
+tokens; treat an answer-link URL like the message content it represents.
 
 ## Build from source
 
 ```bash
 npm install         # dev deps only — the plugin has zero runtime deps
 npm run typecheck   # tsc --noEmit (needs the adjacent omadia checkout, see below)
+npm test            # node:test suite — unit tests + mocked-webhook integration tests
 npm run build       # esbuild bundle → dist/plugin.js, then zip in out/
 ```
 
-`@omadia/channel-sdk` and `@omadia/plugin-api` are provided by the omadia host at runtime (peer deps, never installed here). For the typecheck they are resolved via `tsconfig.json` `paths` from an adjacent checkout at `../omadia/middleware/packages/*/dist` — build those package dists first (`npm run build` inside each package).
+`@omadia/channel-sdk` and `@omadia/plugin-api` are provided by the omadia host at runtime (peer deps, never installed here). For the typecheck (and the test bundle) they are resolved from an adjacent checkout at `../omadia/middleware/packages/*/dist` — build those package dists first (`npm run build` inside each package).
+
+The test suite (`tests/`) covers the markdown-degradation renderer, webhook auth (timing-safe secret, 401 path), inbound filtering (allowlist, dedupe, group drop), the answer-link store/routes, and a full mocked-webhook integration pass (Sendblue stubbed, orchestrator scripted) — no live Sendblue account needed.
 
 ## License
 

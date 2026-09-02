@@ -15,10 +15,11 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.1.1" # === package.json "version"
+  version: "0.2.1" # === package.json "version"
   description:
     "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
-    Omadia-Orchestrator."
+    Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link
+    zugestellt (Web-Auswahlseite)."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
@@ -34,6 +35,21 @@ compat:
   node: ">=20"
 
 depends_on: []
+
+# ---------------------------------------------------------------------------
+# Kernel capabilities consumed via ctx.services. The kernel's service gate
+# (omadia#838) rejects any ctx.services.get(<name>) whose name is not declared
+# here, so the list must mirror what plugin.ts actually resolves:
+#   chatAgent                — hard; the orchestrator the channel drives.
+#   channelResolver          — optional; Agent-binding routing (line / sender).
+#   channelDirectoryRegistry — optional; lists the line in the operator
+#                              channels dashboard as a pickable binding key.
+# ---------------------------------------------------------------------------
+requires:
+  - "chatAgent@^1"
+optional_requires:
+  - "channelResolver@^1"
+  - "channelDirectoryRegistry@^1"
 
 lifecycle:
   entry: "dist/plugin.js" # exports `activate(ctx, core)` (ChannelPlugin shape 1)
@@ -80,10 +96,27 @@ setup:
       same token there too — the plugin also accepts the secret from a request
       header.
 
-      ### 4. Sandbox note
+      ### 4. Answer links (optional, recommended)
+      iMessage cannot render choice buttons. When you set **Public base URL**
+      (the public HTTPS origin of this Omadia instance, e.g.
+      `https://omadia.example.com`), an answer with a choice card additionally
+      carries a link: it opens a selection page in the browser and the pick
+      flows back into the same iMessage
+      conversation. Leave the field empty to disable — choices then degrade to
+      the plain "reply with one of these" text as before. **Answer link TTL**
+      controls how long such a link stays answerable (hours, default 24).
+
+      ### 5. Sandbox note
       On Sendblue's **free/sandbox tier** you share a line: recipients must
       have **texted the line first** / be verified contacts before the API can
       message them. A paid dedicated line has no such restriction.
+
+      ### 6. Privacy note (read before enabling)
+      **All message content transits Sendblue's infrastructure** — both
+      directions, including media. Sendblue is a third-party relay, not an
+      Apple-sanctioned API. Enable this channel deliberately (opt-in), inform
+      the people texting the line that a relay provider processes the content,
+      and use the **allowlist** to keep the audience explicit.
 
       > ⚠️ **Note:** Sendblue is an unofficial Apple iMessage relay — Apple
       > offers no public iMessage API, so continuity depends on the provider.
@@ -118,11 +151,30 @@ setup:
       dasselbe Token ein — das Plugin akzeptiert das Secret auch aus einem
       Request-Header.
 
-      ### 4. Sandbox-Hinweis
+      ### 4. Antwort-Links (optional, empfohlen)
+      iMessage kann keine Auswahl-Buttons darstellen. Wenn du die **Öffentliche
+      Basis-URL** setzt (der öffentliche HTTPS-Origin dieser Omadia-Instanz,
+      z.B. `https://omadia.example.com`), enthält eine Antwort mit
+      Auswahlfrage zusätzlich einen Link: Er öffnet eine Auswahlseite im
+      Browser und die Auswahl fließt zurück
+      in dieselbe iMessage-Unterhaltung. Feld leer lassen = deaktiviert —
+      Auswahlfragen degradieren dann wie bisher zu reinem Text. **Antwort-Link
+      TTL** steuert, wie lange ein Link beantwortbar bleibt (Stunden,
+      Standard 24).
+
+      ### 5. Sandbox-Hinweis
       Im **Free-/Sandbox-Tarif** von Sendblue teilst du dir eine Line:
       Empfänger müssen die Nummer **zuerst anschreiben** bzw. verifizierte
       Kontakte sein, bevor die API sie erreichen darf. Eine bezahlte eigene
       Line hat diese Einschränkung nicht.
+
+      ### 6. Datenschutz-Hinweis (vor dem Aktivieren lesen)
+      **Sämtlicher Nachrichteninhalt läuft über die Infrastruktur von
+      Sendblue** — in beide Richtungen, inklusive Medien. Sendblue ist ein
+      Dritt-Relay, keine von Apple sanktionierte API. Aktiviere den Channel
+      bewusst (Opt-in), informiere die Personen, die die Line anschreiben,
+      dass ein Relay-Provider die Inhalte verarbeitet, und halte den Kreis
+      mit der **Allowlist** explizit.
 
       > ⚠️ **Hinweis:** Sendblue ist eine inoffizielle Apple-iMessage-Anbindung —
       > Apple bietet keine öffentliche iMessage-API, die Kontinuität hängt also
@@ -187,6 +239,25 @@ setup:
       required: false
       default: ""
 
+    - key: "public_base_url"
+      type: "url"
+      label: "Öffentliche Basis-URL (optional)"
+      help:
+        "Öffentlicher HTTPS-Origin dieser Omadia-Instanz (z.B.
+        https://omadia.example.com). Aktiviert Antwort-Links für
+        Auswahlfragen: Auswahl per Web-Seite/App statt Text-Antwort. Leer =
+        deaktiviert."
+      required: false
+      default: ""
+
+    - key: "answer_link_ttl_hours"
+      type: "string"
+      label: "Antwort-Link TTL in Stunden (optional)"
+      help:
+        "Wie lange ein Antwort-Link beantwortbar bleibt. Standard: 24."
+      required: false
+      default: "24"
+
   self_test: false
 
 # ---------------------------------------------------------------------------
@@ -238,6 +309,14 @@ channel:
     kind: "webhook"
     routes:
       - path: "/api/imessage/webhook/:token"
+        method: "POST"
+      # Answer links (deep-link Phase 1) — public capability URLs; the token
+      # itself is the authorization (delivered only via iMessage).
+      - path: "/api/imessage/a/:token"
+        method: "GET"
+      - path: "/api/imessage/answers/:token"
+        method: "GET"
+      - path: "/api/imessage/answers/:token/reply"
         method: "POST"
     verify_signature: false
   capabilities:

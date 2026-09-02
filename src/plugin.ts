@@ -15,6 +15,12 @@ import {
 import type { PluginContext } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
+import { AnswerStore } from './answerStore.js';
+import { createAnswersRouter } from './answersRouter.js';
+import {
+  buildIMessageKeyDirectory,
+  type ChannelDirectoryRegistryShim,
+} from './channelKeyDirectory.js';
 import { createLruSet, evaluateInbound, normalizePhone } from './inbound.js';
 import { renderAnswer } from './renderer.js';
 import { SendblueClient } from './sendblueClient.js';
@@ -53,6 +59,14 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     ctx.config.get<string>('api_v2_base_url') ?? 'https://api.sendblue.com',
   );
   const allowlist = parseAllowlist(ctx.config.get<string>('allowlist') ?? '');
+
+  // Answer links (deep-link concept Phase 1). Empty public_base_url disables
+  // the feature entirely — choice cards then degrade to text-only as before.
+  const publicBaseUrl = trimBase((ctx.config.get<string>('public_base_url') ?? '').trim());
+  const ttlHours = parsePositive(ctx.config.get<string>('answer_link_ttl_hours'), 24);
+  const answerStore = new AnswerStore({ ttlMs: ttlHours * 60 * 60 * 1000 });
+  const links: AnswerLinkContext | null =
+    publicBaseUrl.length > 0 ? { store: answerStore, publicBaseUrl } : null;
 
   // Resolve the orchestrator's ChatAgent. Prefers the SDK's getChatAgent()
   // helper; falls back to the raw 'chatAgent' service lookup so the plugin
@@ -130,7 +144,50 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     });
   });
 
+  // Answer-link routes share the public webhook mount. Mounted even when the
+  // feature is off (publicBaseUrl empty) — the store is simply never written,
+  // so every token 404s.
+  router.use(
+    createAnswersRouter({
+      store: answerStore,
+      routePrefix: ROUTE_PREFIX,
+      log: (level, msg, data) => core.log(level, msg, data),
+      onReply: async (entry, option) => {
+        const replyTurn: IncomingTurn = {
+          channelId,
+          conversationId: entry.conversationId,
+          channelType: CHANNEL_TYPE,
+          channelKey: entry.conversationId,
+          userRef: { kind: 'imessage-handle', id: entry.conversationId },
+          text: option.value,
+          metadata: { via: 'answer-link' },
+          rawEvent: { source: 'answer-link', token: entry.token },
+        };
+        await handleTurn(ctx, agent, core, client, state, replyTurn, links);
+      },
+    }),
+  );
+
   core.registerRouter(channelId, ROUTE_PREFIX, router);
+
+  // Contribute the configured line to the operator channels dashboard
+  // (`GET /api/v1/operator/channels`) so it is a pickable binding key instead
+  // of a string the operator has to memorise. Optional service — a pre-US7
+  // host simply has no registry, and the channel works without the listing.
+  const directoryRegistry = ctx.services.get<ChannelDirectoryRegistryShim>(
+    'channelDirectoryRegistry',
+  );
+  if (directoryRegistry) {
+    directoryRegistry.register(
+      buildIMessageKeyDirectory({ fromNumber, originPluginId: channelId }),
+    );
+    core.log('info', `channel-key directory contributed: imessage · ${fromNumber}`);
+  } else {
+    core.log(
+      'info',
+      'channelDirectoryRegistry not published — skipping /operator/channels contribution',
+    );
+  }
 
   // Webhook mounted + config validated — as connected as a webhook-only
   // channel gets (there is no long-lived connection to watch).
@@ -141,6 +198,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     adminUi: `${ADMIN_ROUTE_PREFIX}/index.html`,
     fromNumber,
     allowlisted: allowlist.size,
+    answerLinks: links ? `enabled (ttl ${ttlHours}h)` : 'disabled (no public_base_url)',
   });
 
   async function handleInbound(body: unknown): Promise<void> {
@@ -158,17 +216,30 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       }
       return;
     }
-    await handleTurn(ctx, agent, core, client, state, result.turn);
+    // A plain-text reply resolves any pending answer link of the conversation
+    // — the user answered in iMessage, so a later link tap must 409.
+    answerStore.resolveOpenForConversation(result.turn.conversationId, 'text');
+    await handleTurn(ctx, agent, core, client, state, result.turn, links);
   }
 
   return {
     async close() {
       // The webhook route auto-503s on deactivation; the admin routes are
-      // disposed explicitly, then the dedupe structure is released.
+      // disposed explicitly, then the dedupe structure is released. The
+      // directory contribution is dropped so /operator/channels stops
+      // listing this line once the plugin is deactivated.
       disposeAdminRoutes();
+      directoryRegistry?.unregister(CHANNEL_TYPE);
       seen.clear();
+      answerStore.clear();
     },
   };
+}
+
+/** Answer-link feature context — null when public_base_url is not configured. */
+interface AnswerLinkContext {
+  store: AnswerStore;
+  publicBaseUrl: string;
 }
 
 /** Drive one orchestrator turn and ship the rendered answer back via Sendblue. */
@@ -179,15 +250,22 @@ async function handleTurn(
   client: SendblueClient,
   state: ChannelState,
   turn: IncomingTurn,
+  links: AnswerLinkContext | null,
 ): Promise<void> {
   // Fire-and-forget typing indicator (best-effort, never throws).
   void client.sendTypingIndicator(turn.conversationId).then((ok) => {
     if (!ok) core.log('debug', 'iMessage typing indicator failed (ignored)');
   });
 
-  // US7 — route to the Agent the operator bound to this iMessage handle
-  // (per-conversation), else the platform fallback Agent, else the default.
-  const agent = resolveAgentForTurn(ctx, CHANNEL_TYPE, [turn.conversationId], defaultAgent);
+  // US7 — most-specific key first: a binding on the sender's E.164 wins,
+  // then a binding on the line itself (the key the channel directory lists),
+  // then the platform fallback Agent, then the default.
+  const agent = resolveAgentForTurn(
+    ctx,
+    CHANNEL_TYPE,
+    [turn.conversationId, state.me?.fromNumber],
+    defaultAgent,
+  );
   try {
     const answer = await agent.chat({
       userMessage: turn.text,
@@ -201,7 +279,15 @@ async function handleTurn(
       logNoReplyDrop(turn.channelId, { conversationId: turn.conversationId });
       return;
     }
-    const text = renderAnswer(answer);
+    // Deep-link Phase 1: a choice card gets a capability URL so the user can
+    // pick in the app / browser instead of typing. Creating the entry
+    // supersedes any older open link of this conversation.
+    let choiceLinkUrl: string | undefined;
+    if (links && answer.interactive?.kind === 'choice') {
+      const entry = links.store.create(turn.conversationId, answer.interactive);
+      choiceLinkUrl = `${links.publicBaseUrl}${ROUTE_PREFIX}/a/${entry.token}`;
+    }
+    const text = renderAnswer(answer, choiceLinkUrl ? { choiceLinkUrl } : undefined);
     if (text.trim().length === 0) return;
     await client.sendMessage({ number: turn.conversationId, content: text });
     // A successful send clears a previously surfaced send error.
@@ -302,4 +388,10 @@ function parseAllowlist(raw: string): Set<string> {
 /** Strip a trailing slash so `${base}/api/...` never doubles the slash. */
 function trimBase(url: string): string {
   return url.replace(/\/+$/, '');
+}
+
+/** Parse a positive number from an optional config string, else `fallback`. */
+function parsePositive(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
