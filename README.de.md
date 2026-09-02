@@ -112,6 +112,13 @@ einmalig nutzbar, TTL-gebunden und die einzige Autorisierung (es wird
 ausschließlich an die Empfänger-Nummer zugestellt). `GET` ist
 nebenwirkungsfrei — Apples Link-Preview-Crawler kann nie „antworten“.
 
+Nach der Auswahl ersetzt die Seite die Frage durch eine Bestätigung und bietet
+einen `sms:`-Link auf die konfigurierte `from_number` an — den Thread, in dem
+die Antwort ankommt. Der User wird also zurück in die Unterhaltung geführt statt
+im Browser zu stranden. Die Seite folgt der Lume-Designsprache von omadia; die
+Tokens liegen als Kopie in der Datei, weil sie ohne externe Assets ausgeliefert
+wird.
+
 Routen (auf demselben öffentlichen Router wie das Webhook):
 
 | Route | Zweck |

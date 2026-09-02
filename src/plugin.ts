@@ -151,6 +151,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     createAnswersRouter({
       store: answerStore,
       routePrefix: ROUTE_PREFIX,
+      returnNumber: fromNumber,
       log: (level, msg, data) => core.log(level, msg, data),
       onReply: async (entry, option) => {
         const replyTurn: IncomingTurn = {

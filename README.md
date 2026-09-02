@@ -81,6 +81,12 @@ answered"). The token is 128-bit random, single-use, TTL-bound, and the only
 authorization (it is delivered exclusively to the recipient's number). `GET`
 is side-effect free, so Apple's link-preview crawler can never answer.
 
+After a pick, the page replaces the question with a confirmation and offers a
+`sms:` link back to the configured `from_number` — the thread the answer
+arrives in — so the user is handed back to the conversation instead of being
+left in the browser. The page follows omadia's Lume design language; it carries
+its own token copy because it ships without external assets.
+
 Routes (mounted on the same public router as the webhook):
 
 | Route | Purpose |

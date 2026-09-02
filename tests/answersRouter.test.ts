@@ -158,6 +158,61 @@ describe('POST /answers/:token/reply', () => {
   });
 });
 
+describe('answer page — return-to-conversation deep link', () => {
+  // The confirmation hands the user back to the thread. The link target is the
+  // Sendblue line (`from_number`), never the recipient's own conversationId —
+  // that would open a thread with themselves.
+  const SENDBLUE_LINE = '+4915199988877';
+  const RECIPIENT = '+491701234567';
+
+  async function pageWith(returnNumber: string | undefined): Promise<string> {
+    const local = new AnswerStore({ ttlMs: HOUR, now: () => nowMs });
+    const app = express();
+    app.use(
+      '/api/imessage',
+      createAnswersRouter({
+        store: local,
+        routePrefix: '/api/imessage',
+        log: () => undefined,
+        onReply: async () => undefined,
+        ...(returnNumber === undefined ? {} : { returnNumber }),
+      }),
+    );
+    const srv = app.listen(0);
+    await new Promise<void>((resolve) => srv.once('listening', resolve));
+    const addr = srv.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    const entry = local.create(RECIPIENT, CHOICE);
+    const html = await (await fetch(`http://127.0.0.1:${addr.port}/api/imessage/a/${entry.token}`)).text();
+    srv.close();
+    return html;
+  }
+
+  it('renders an sms: link to the Sendblue line, not to the recipient', async () => {
+    const html = await pageWith(SENDBLUE_LINE);
+    assert.ok(html.includes(`sms:${SENDBLUE_LINE}`), 'deep link targets the configured line');
+    assert.ok(!html.includes(`sms:${RECIPIENT}`), 'never links back to the recipient itself');
+    assert.ok(html.includes('Zurück zu iMessage'), 'confirmation offers the way back');
+  });
+
+  it('falls back to a written instruction when no line is configured', async () => {
+    const html = await pageWith(undefined);
+    assert.ok(!html.includes('sms:'), 'no dead deep link without a number');
+    assert.ok(html.includes('Messages'), 'points at the system back affordance instead');
+  });
+
+  it('drops an unusable number instead of rendering a broken link', async () => {
+    const html = await pageWith('nicht-gesetzt');
+    assert.ok(!html.includes('sms:'), 'garbage in config never becomes an href');
+  });
+
+  it('replaces the question with a confirmation instead of appending a status line', async () => {
+    const html = await pageWith(SENDBLUE_LINE);
+    assert.ok(html.includes('Antwort gesendet'), 'takeover headline is rendered on 202');
+    assert.ok(html.includes('card.innerHTML'), 'the question screen is replaced, not annotated');
+  });
+});
+
 describe('maskPhone', () => {
   it('masks down to prefix and trailing digits', () => {
     assert.equal(maskPhone('+491701234567'), '+49 … 67');

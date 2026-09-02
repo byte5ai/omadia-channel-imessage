@@ -22,6 +22,11 @@ export interface AnswersRouterDeps {
   /** Route prefix the parent router is mounted under (for absolute paths in
    *  the page/JSON), e.g. `/api/imessage`. */
   routePrefix: string;
+  /** The configured Sendblue line (`from_number`). Rendered into the page as
+   *  the `sms:` deep link back to the conversation — it is the other end of
+   *  the thread, unlike `entry.conversationId` (the recipient's own number).
+   *  Omitted → the page falls back to a written "go back" instruction. */
+  returnNumber?: string | null;
   /**
    * Drive one orchestrator turn for an accepted reply. Called DETACHED after
    * the 202 — an orchestrator turn can take longer than any sane HTTP
@@ -50,6 +55,7 @@ export function createAnswersRouter(deps: AnswersRouterDeps): Router {
         renderAnswerPage({
           entry,
           replyPath: `${deps.routePrefix}/answers/${encodeURIComponent(token)}/reply`,
+          returnNumber: deps.returnNumber ?? null,
           appUrl: null,
         }),
       );
