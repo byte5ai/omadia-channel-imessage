@@ -73,6 +73,40 @@ describe('mdToPlainText — code shelter', () => {
     assert.ok(!out.includes('```'));
   });
 
+  it('treats a ```lang line inside an open fence as content, not as the closer', () => {
+    // Observed on device: the model wrapped a whole markdown demo in one fence
+    // and nested a ```python block inside. Pairing fences lazily made the
+    // nested opener the closer and pushed every later fence boundary — the
+    // GFM table that followed ended up sheltered as code.
+    const md = [
+      'Demo:',
+      '```',
+      '**Fett**',
+      '```python',
+      'print("hi")',
+      '```',
+      '',
+      '| Feld | Wert |',
+      '| --- | --- |',
+      '| Name | Ada |',
+    ].join('\n');
+    assert.equal(mdToPlainText(md), 'Demo:\n**Fett**\n```python\nprint("hi")\n\nName: Ada');
+  });
+
+  it('ignores triple backticks that are not on their own line', () => {
+    assert.equal(mdToPlainText('Code-Blöcke (```), **Tabellen**'), 'Code-Blöcke (```), Tabellen');
+  });
+
+  it('drops an unclosed fence line and keeps the rest as prose', () => {
+    const md = 'Text\n```\n| Feld | Wert |\n| --- | --- |\n| Name | Ada |';
+    assert.equal(mdToPlainText(md), 'Text\nName: Ada');
+  });
+
+  it('requires the closer to have at least as many backticks as the opener', () => {
+    assert.equal(mdToPlainText('````\n```\n**x**\n````\nfertig'), '```\n**x**\nfertig');
+    assert.equal(mdToPlainText('```\ncode\n`````\n**fett**'), 'code\nfett');
+  });
+
   it('keeps inline code verbatim (markup inside is not transformed)', () => {
     const out = mdToPlainText('Nutze `--flag *glob*` dafür');
     assert.equal(out, 'Nutze --flag *glob* dafür');

@@ -82,11 +82,7 @@ export function mdToPlainText(md: string): string {
   const sheltered: string[] = [];
   const stash = (content: string): string => `\x00${sheltered.push(content) - 1}\x00`;
 
-  let text = md
-    // fenced code blocks: keep the body, drop the fences (incl. language tag)
-    .replace(/```[^\n]*\n([\s\S]*?)```/g, (_m, code: string) => stash(code.replace(/\n$/, '')))
-    // unmatched leftover fence line (truncated block): drop the fence line
-    .replace(/^```[^\n]*\n?/gm, '')
+  let text = shelterFences(md, stash)
     // GFM task items: the checkbox after a list marker is dropped (`• [ ]`
     // is noise in a bubble); a checked box keeps a ✓ so done-state survives.
     // Models often wrap the box in backticks (`- \`[x]\` Kisten`), so a code
@@ -141,6 +137,44 @@ export function mdToPlainText(md: string): string {
     .replace(/[ \t]+$/gm, '');
 
   return text.replace(/\x00(\d+)\x00/g, (_m, i: string) => sheltered[Number(i)] ?? '');
+}
+
+/**
+ * Fenced code blocks per CommonMark, line-based: the opening fence is a line
+ * of >=3 backticks (up to 3 spaces indent) plus an optional info string; the
+ * closing fence is a line holding ONLY >= that many backticks. Anything else
+ * is content — a ```lang line inside an open block (models nest fences when
+ * they "show markdown"), or ``` inline in prose ("Code-Blöcke (```)"). The
+ * body is sheltered verbatim, both fence lines are dropped.
+ *
+ * An unclosed fence is deliberately NOT CommonMark (which would swallow the
+ * rest of the document as code): the fence line is dropped and the rest stays
+ * prose. A bubble is not a document, and models regularly leave one open.
+ */
+function shelterFences(md: string, stash: (content: string) => string): string {
+  const lines = md.split('\n');
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] ?? '';
+    const open = /^ {0,3}(`{3,})([^`]*)$/.exec(line);
+    if (!open) {
+      out.push(line);
+      i += 1;
+      continue;
+    }
+    const closer = new RegExp(`^ {0,3}\`{${open[1]?.length ?? 3},} *$`);
+    let j = i + 1;
+    while (j < lines.length && !closer.test(lines[j] ?? '')) j += 1;
+    if (j >= lines.length) {
+      // unclosed: drop the fence line, keep scanning the rest as prose
+      i += 1;
+      continue;
+    }
+    out.push(stash(lines.slice(i + 1, j).join('\n')));
+    i = j + 1;
+  }
+  return out.join('\n');
 }
 
 interface ParsedTable {

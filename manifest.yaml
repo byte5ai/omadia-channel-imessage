@@ -15,7 +15,7 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.2.12" # === package.json "version"
+  version: "0.2.13" # === package.json "version"
   description:
     "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
     Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link
