@@ -11,7 +11,7 @@
 export type ConnectionStatus =
   | 'starting' // activate() called, webhook route not yet mounted
   | 'connected' // config validated + webhook route mounted (webhook-only channel: there is no long-lived connection to watch)
-  | 'error'; // unexpected fatal error (see lastError)
+  | 'error'; // an outbound send failed (see lastError); cleared by the next success
 
 /** The configured Sendblue line this channel sends from. */
 export interface IMessageIdentity {

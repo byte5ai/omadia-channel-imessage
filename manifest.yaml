@@ -15,7 +15,7 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.2.13" # === package.json "version"
+  version: "0.2.14" # === package.json "version"
   description:
     "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
     Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link
@@ -106,6 +106,12 @@ setup:
       the plain "reply with one of these" text as before. **Answer link TTL**
       controls how long such a link stays answerable (hours, default 24).
 
+      > ⚠️ Open answer links live in memory inside this plugin instance. A
+      > restart or redeploy voids every outstanding link before its TTL, and
+      > running more than one middleware replica breaks links (a token minted
+      > on one replica is unknown to the others) and can process an inbound
+      > message twice. Run this channel on a single replica.
+
       ### 5. Sandbox note
       On Sendblue's **free/sandbox tier** you share a line: recipients must
       have **texted the line first** / be verified contacts before the API can
@@ -161,6 +167,12 @@ setup:
       Auswahlfragen degradieren dann wie bisher zu reinem Text. **Antwort-Link
       TTL** steuert, wie lange ein Link beantwortbar bleibt (Stunden,
       Standard 24).
+
+      > ⚠️ Offene Antwort-Links liegen im Speicher dieser Plugin-Instanz. Ein
+      > Neustart oder Deploy entwertet alle offenen Links vor Ablauf der TTL;
+      > mit mehr als einer Middleware-Replica brechen Links (ein Token einer
+      > Replica ist den anderen unbekannt) und eingehende Nachrichten können
+      > doppelt verarbeitet werden. Diesen Channel auf einer Replica betreiben.
 
       ### 5. Sandbox-Hinweis
       Im **Free-/Sandbox-Tarif** von Sendblue teilst du dir eine Line:
@@ -323,6 +335,10 @@ channel:
     verify_signature: false
   capabilities:
     - "text"
+    # Inbound only: a Sendblue `media_url` becomes a typed IncomingAttachment
+    # (image/video/audio) and reaches the orchestrator's vision path. Outbound
+    # media is not implemented — attachments degrade to a link line.
+    - "attachments"
     - "typing_indicator"
   adapters:
     - "text"

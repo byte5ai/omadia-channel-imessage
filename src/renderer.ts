@@ -54,7 +54,7 @@ export function renderAnswerBubbles(a: SemanticAnswer, opts?: RenderOptions): st
     parts.push(renderFollowUps(a.followUps));
   }
 
-  if (a.disclaimer) parts.push(a.disclaimer);
+  if (a.disclaimer) parts.push(mdBlock(a.disclaimer));
 
   const text = parts.join('\n\n');
   const bubbles = text.trim().length > 0 ? [text] : [];
@@ -82,7 +82,12 @@ export function mdToPlainText(md: string): string {
   const sheltered: string[] = [];
   const stash = (content: string): string => `\x00${sheltered.push(content) - 1}\x00`;
 
-  let text = shelterFences(md, stash)
+  // NUL is the shelter delimiter, so it must not occur in the input — a stray
+  // one would make user text look like a placeholder to the restore pass.
+  // CRLF is normalised here so every line-anchored rule below (fences,
+  // headings, list markers) sees a bare \n; a trailing \r used to defeat the
+  // closing-fence match and send the block back through the prose pipeline.
+  let text = shelterFences(md.replace(/\x00/g, '').replace(/\r\n?/g, '\n'), stash)
     // GFM task items: the checkbox after a list marker is dropped (`• [ ]`
     // is noise in a bubble); a checked box keeps a ✓ so done-state survives.
     // Models often wrap the box in backticks (`- \`[x]\` Kisten`), so a code
@@ -123,33 +128,65 @@ export function mdToPlainText(md: string): string {
     .replace(emphasis('\\*', '\\*', '[^*]'), '$1')
     // _italic_ — word-internal underscores (snake_case) survive
     .replace(emphasis('(?<![\\w_])_', '_(?![\\w_])', '[^_]'), '$1')
-    // [label](url) → label (url); the url is sheltered so the heading
-    // uppercasing below can never mangle a case-sensitive path
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) => `${label} (${stash(url)})`)
+    // [label](url) → label (url), ![alt](url) → alt (url); the url is
+    // sheltered so the heading uppercasing below can never mangle a
+    // case-sensitive path. Any target is accepted, not just http(s): a
+    // `mailto:` or relative link that keeps its brackets is the raw syntax
+    // leaking into the bubble, which is exactly what this pass exists to stop.
+    .replace(/!?\[([^\]]*)\]\(([^\s)]+)\)/g, (_m, label: string, url: string) =>
+      label.trim().length > 0 ? `${label} (${stash(url)})` : stash(url))
+    // autolinks <https://…> / <mailto:…> → the bare target
+    .replace(/<((?:[a-z][a-z0-9+.-]*):[^>\s]+)>/gi, (_m, url: string) => stash(url))
     // headings → UPPERCASE line set off by blank lines
-    .replace(/^#{1,6}\s+(.+)$/gm, (_m, h: string) => `\n${h.trim().toUpperCase()}\n`)
-    // blockquotes (incl. nested) → » line
-    .replace(/^(?:>\s?)+/gm, '» ')
+    .replace(/^#{1,6}[ \t]+(.+)$/gm, (_m, h: string) => `\n${h.trim().toUpperCase()}\n`)
+    // blockquotes (incl. nested) → » line. The separator is [ \t], never \s:
+    // \s matches the newline, so a bare `>` line used to swallow the line
+    // after it and silently merge two quoted paragraphs into one.
+    .replace(/^(?:>[ \t]?)+/gm, '» ')
     // unordered list markers → •
-    .replace(/^(\s*)[-*+]\s+/gm, '$1• ')
+    .replace(/^([ \t]*)[-*+][ \t]+/gm, '$1• ')
     // collapse the blank-line padding introduced above
     .replace(/\n{3,}/g, '\n\n')
     .replace(/[ \t]+$/gm, '');
 
-  return text.replace(/\x00(\d+)\x00/g, (_m, i: string) => sheltered[Number(i)] ?? '');
+  // Restore repeatedly: shelters nest (an escaped backtick is stashed BEFORE
+  // the code-span rule, so its placeholder ends up inside the span's stashed
+  // content). A single pass does not rescan the text it just inserted, which
+  // used to leak the raw NUL delimiters of the inner placeholder into the
+  // outgoing message. Depth is bounded by construction; the cap is a guard
+  // against a pathological input rather than an expected case.
+  let out = text;
+  for (let pass = 0; pass < 10 && out.includes('\x00'); pass += 1) {
+    out = out.replace(/\x00(\d+)\x00/g, (_m, i: string) => sheltered[Number(i)] ?? '');
+  }
+  // Any delimiter still standing belongs to no known shelter — drop it rather
+  // than ship a control character.
+  return out.replace(/\x00/g, '');
 }
 
 /**
  * Fenced code blocks per CommonMark, line-based: the opening fence is a line
- * of >=3 backticks (up to 3 spaces indent) plus an optional info string; the
- * closing fence is a line holding ONLY >= that many backticks. Anything else
- * is content — a ```lang line inside an open block (models nest fences when
- * they "show markdown"), or ``` inline in prose ("Code-Blöcke (```)"). The
- * body is sheltered verbatim, both fence lines are dropped.
+ * of >=3 backticks OR >=3 tildes plus an optional info string; the closing
+ * fence is a line holding ONLY >= that many of the SAME character. Anything
+ * else is content — a ```lang line inside an open block (models nest fences
+ * when they "show markdown"), or ``` inline in prose ("Code-Blöcke (```)").
+ * The body is sheltered verbatim, both fence lines are dropped.
+ *
+ * Container awareness, without a container parser: a fence may be introduced
+ * by a blockquote prefix (`> `) and/or arbitrary indentation (a fence nested
+ * in a list item sits well past the 3-space limit a top-level fence has). The
+ * opener's prefix is recorded and stripped from the body and the closer, so a
+ * quoted or list-nested block is sheltered instead of being run through the
+ * prose pipeline — which used to silently rewrite the code it contained.
+ * Indentation is therefore NOT treated as an indented code block here; in a
+ * bubble the two degrade to the same thing (verbatim text) anyway.
  *
  * An unclosed fence is deliberately NOT CommonMark (which would swallow the
  * rest of the document as code): the fence line is dropped and the rest stays
- * prose. A bubble is not a document, and models regularly leave one open.
+ * prose. A bubble is not a document, and models regularly leave one open. If
+ * the info string is separated from the marker by a space it is kept as prose
+ * — that shape is a sentence continuing after an inline ``` mention, not a
+ * language tag, and dropping the whole line used to eat the sentence.
  */
 function shelterFences(md: string, stash: (content: string) => string): string {
   const lines = md.split('\n');
@@ -157,24 +194,52 @@ function shelterFences(md: string, stash: (content: string) => string): string {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i] ?? '';
-    const open = /^ {0,3}(`{3,})([^`]*)$/.exec(line);
-    if (!open) {
+    const open = /^([ \t]*(?:>[ \t]?)*[ \t]*)((`{3,})|(~{3,}))(.*)$/.exec(line);
+    const marker = open?.[2] ?? '';
+    const info = open?.[5] ?? '';
+    // A backtick fence's info string may not contain a backtick (CommonMark);
+    // without that rule `` ``` `x` `` `` in prose would open a block.
+    if (!open || (marker.startsWith('`') && info.includes('`'))) {
       out.push(line);
       i += 1;
       continue;
     }
-    const closer = new RegExp(`^ {0,3}\`{${open[1]?.length ?? 3},} *$`);
+    const prefix = open[1] ?? '';
+    const quoteDepth = (prefix.match(/>/g) ?? []).length;
+    const indent = prefix.replace(/>[ \t]?/g, '').length;
+    const strip = (l: string): string => stripContainerPrefix(l, quoteDepth, indent);
+    const closer = new RegExp(`^${marker[0] === '`' ? '`' : '~'}{${marker.length},}[ \t]*$`);
+
     let j = i + 1;
-    while (j < lines.length && !closer.test(lines[j] ?? '')) j += 1;
+    while (j < lines.length && !closer.test(strip(lines[j] ?? ''))) j += 1;
     if (j >= lines.length) {
-      // unclosed: drop the fence line, keep scanning the rest as prose
+      // unclosed: drop the fence marker; keep a space-separated info string,
+      // which is prose rather than a language tag
+      if (/^[ \t]/.test(info) && info.trim().length > 0) out.push(info.trim());
       i += 1;
       continue;
     }
-    out.push(stash(lines.slice(i + 1, j).join('\n')));
+    out.push(stash(lines.slice(i + 1, j).map(strip).join('\n')));
     i = j + 1;
   }
   return out.join('\n');
+}
+
+/** Remove up to `quoteDepth` blockquote markers and then up to `indent`
+ *  columns of leading whitespace — the opener's container prefix. */
+function stripContainerPrefix(line: string, quoteDepth: number, indent: number): string {
+  let rest = line;
+  for (let q = 0; q < quoteDepth; q += 1) {
+    const m = /^[ \t]*>[ \t]?/.exec(rest);
+    if (!m) break;
+    rest = rest.slice(m[0].length);
+  }
+  let removed = 0;
+  while (removed < indent && (rest.startsWith(' ') || rest.startsWith('\t'))) {
+    rest = rest.slice(1);
+    removed += 1;
+  }
+  return rest;
 }
 
 interface ParsedTable {
@@ -230,7 +295,10 @@ function isTableRow(line: string): boolean {
 function isTableSeparator(line: string): boolean {
   if (!isTableRow(line)) return false;
   const cells = splitTableCells(line);
-  return cells.every((c) => /^:?-{3,}:?$/.test(c.trim()));
+  // GFM requires only ONE dash per delimiter cell (optionally colon-anchored).
+  // Demanding three rejected `| - | - |` and `| :- | -: |`, and a rejected
+  // delimiter row means the whole table leaks into the bubble as raw pipes.
+  return cells.every((c) => /^:?-+:?$/.test(c.trim()));
 }
 
 function splitTableCells(line: string): string[] {
@@ -254,7 +322,13 @@ function formatTable(t: ParsedTable): string {
 
   // 2-column compact path: "key: value" lines (typical for report tables).
   if (colCount === 2) {
-    return t.rows.map((r) => `${cell(r, 0)}: ${cell(r, 1)}`).join('\n');
+    return t.rows
+      .map((r) => {
+        const key = cell(r, 0);
+        const value = cell(r, 1);
+        return value ? `${key}: ${value}` : key;
+      })
+      .join('\n');
   }
 
   // Detect leading row-index column ("#", "Nr.", or blank header + 1/2/3
@@ -276,11 +350,14 @@ function formatTable(t: ParsedTable): string {
     const headingValue = cell(row, headingCol) || '—';
     const headingPrefix = firstColIsIndex ? `${String(rowIdx + 1)}. ` : '';
     const fieldLines: string[] = [];
-    for (let c = fieldStartCol; c < t.header.length; c++) {
+    // Bound by colCount, not header.length: a ragged row with more cells than
+    // the header declares used to have its surplus cells silently dropped.
+    // Such a cell has no column name, so it is emitted as a bare value.
+    for (let c = fieldStartCol; c < colCount; c++) {
       const name = (t.header[c] ?? '').trim();
       const value = cell(row, c);
       if (!value) continue;
-      fieldLines.push(`  ${name}: ${value}`);
+      fieldLines.push(name ? `  ${name}: ${value}` : `  ${value}`);
     }
     blocks.push(
       `${headingPrefix}${headingValue}${fieldLines.length > 0 ? `\n${fieldLines.join('\n')}` : ''}`,
@@ -289,10 +366,34 @@ function formatTable(t: ParsedTable): string {
   return blocks.join('\n\n');
 }
 
+/**
+ * Degrade a value that has to stay on ONE line (an option label, an
+ * attachment's alt text, a follow-up prompt). The full pipeline can introduce
+ * line breaks — a heading is set off by blank lines, a list marker becomes its
+ * own `•` line — which would break the caller's own bullet layout, so the
+ * result is flattened back to a single line.
+ */
+function mdInline(value: string): string {
+  return mdBlock(value).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Degrade a multi-line prose field (question, rationale, disclaimer).
+ *
+ * Non-string input is tolerated rather than thrown on: these fields cross the
+ * plugin boundary from model output, and a renderer that throws aborts the
+ * whole turn and sends the user a generic error instead of the answer.
+ */
+function mdBlock(value: string | undefined | null): string {
+  return typeof value === 'string' ? mdToPlainText(value).trim() : '';
+}
+
 function renderChoice(choice: OutgoingChoiceCard, hasLink: boolean): string {
-  const lines = [choice.question];
-  if (choice.rationale) lines.push(choice.rationale);
-  for (const opt of choice.options) lines.push(`• ${opt.label}`);
+  // Every field here is model-authored, so `**Welche Variante**` in a question
+  // is routine — degrading only `answer.text` left that raw in the bubble.
+  const lines = [mdBlock(choice.question)];
+  if (choice.rationale) lines.push(mdBlock(choice.rationale));
+  for (const opt of choice.options) lines.push(`• ${mdInline(opt.label)}`);
   if (hasLink) {
     // The URL itself follows as its own bubble (see renderAnswerBubbles).
     lines.push('Antworte mit einer der Optionen — oder wähle hier aus:');
@@ -304,7 +405,7 @@ function renderChoice(choice: OutgoingChoiceCard, hasLink: boolean): string {
 
 function renderFollowUps(followUps: FollowUpOption[]): string {
   const lines = ['💡 Du kannst auch fragen:'];
-  for (const f of followUps.slice(0, 5)) lines.push(`• ${f.prompt}`);
+  for (const f of followUps.slice(0, 5)) lines.push(`• ${mdInline(f.prompt)}`);
   return lines.join('\n');
 }
 
@@ -312,7 +413,7 @@ function renderAttachments(items: OutgoingAttachment[] | undefined): string | un
   const lines: string[] = [];
   for (const a of items ?? []) {
     const icon = a.kind === 'image' ? '🖼' : '📎';
-    lines.push(`${icon} ${a.altText}: ${a.url}`);
+    lines.push(`${icon} ${mdInline(a.altText)}: ${a.url}`);
   }
   return lines.length > 0 ? lines.join('\n') : undefined;
 }

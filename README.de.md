@@ -91,7 +91,7 @@ die API sie erreichen darf.
 | `api_v2_base_url`         | Default `https://api.sendblue.com` (Tipp-Indikator — beachte `.com`). |
 | `allowlist`               | Optionale komma-getrennte E.164-Nummern; leer = alle erlaubt.         |
 | `public_base_url`         | Optionaler öffentlicher HTTPS-Origin der omadia-Instanz. Aktiviert **Antwort-Links** (siehe unten); leer = deaktiviert. |
-| `answer_link_ttl_hours`   | Wie lange ein Antwort-Link beantwortbar bleibt. Default `24`.         |
+| `answer_link_ttl_hours`   | Wie lange ein Antwort-Link beantwortbar bleibt. Default `24`. Siehe State-Hinweis unten — die TTL ist eine Obergrenze, keine Zusage. |
 
 ## Antwort-Links (interaktive Auswahlfragen)
 
@@ -109,15 +109,35 @@ die nächste Antwort kommt wie gewohnt per iMessage. Antworten per Text
 funktioniert immer weiter; eine Text-Antwort invalidiert den offenen Link (ein
 späterer Tap zeigt „bereits beantwortet“). Das Token ist 128 Bit Zufall,
 einmalig nutzbar, TTL-gebunden und die einzige Autorisierung (es wird
-ausschließlich an die Empfänger-Nummer zugestellt). `GET` ist
-nebenwirkungsfrei — Apples Link-Preview-Crawler kann nie „antworten“.
+ausschließlich an die Empfänger-Nummer zugestellt). Nur `POST` speichert je
+eine Antwort — Apples Link-Preview-Crawler kann durch das Abrufen der Seite
+also nie „antworten“.
 
 Nach der Auswahl ersetzt die Seite die Frage durch eine Bestätigung und bietet
 einen `sms:`-Link auf die konfigurierte `from_number` an — den Thread, in dem
 die Antwort ankommt. Der User wird also zurück in die Unterhaltung geführt statt
 im Browser zu stranden. Die Seite folgt der Lume-Designsprache von omadia; die
-Tokens liegen als Kopie in der Datei, weil sie ohne externe Assets ausgeliefert
-wird.
+**Design-Tokens** (Farben, Abstände, Typografie) sind als Kopie in die Datei
+eingebettet, weil sie ohne externe Assets ausgeliefert wird.
+
+**Der State liegt im Prozess — das ist eine echte Einschränkung.** Offene
+Antwort-Links und das Dedupe-Set für Webhooks liegen in einfachen In-Memory-Maps
+in der Plugin-Instanz: nichts wird persistiert, nichts geteilt. Zwei Folgen, die
+man vor dem Einsatz von Antwort-Links kennen sollte:
+
+- **Ein Neustart entwertet alle offenen Links.** Deploy, Host-Neustart oder
+  Plugin-Toggle verwerfen den Store — ein Link, den der User vor einer Minute
+  bekommen hat, antwortet dann „Link nicht gefunden“, unabhängig von der TTL.
+  `answer_link_ttl_hours` ist also eine Obergrenze, keine Zusage.
+- **Mehr als eine Middleware-Replica bricht Links und kann Turns doppeln.** Ein
+  auf Replica A erzeugtes Token kennt Replica B nicht — ein Tap, den der
+  Load-Balancer auf B leitet, läuft auf 404. Ebenso wiederholt Sendblue eine
+  eingehende Zustellung bis zu 3x; ein Retry auf einer Replica, die das
+  Original nie gesehen hat, gilt nicht als Duplikat und startet den
+  Orchestrator ein zweites Mal.
+
+Bis der Store persistiert ist: diesen Channel auf einer einzelnen Replica
+betreiben.
 
 **Link-Preview.** Der Antwort-Link geht als zweite Bubble raus, die nur die
 URL enthält — iMessage macht aus einem Link nur dann eine Preview-Card, wenn die

@@ -319,3 +319,126 @@ describe('renderAnswer — SemanticAnswer degradation', () => {
     assert.ok(out.includes('• Punkt eins'));
   });
 });
+
+// --- regression suite for the degradation defects found in review ---------
+// Each case below shipped a real, observable defect into an iMessage bubble.
+
+describe('mdToPlainText — shelter restoration', () => {
+  it('restores nested shelters instead of leaking NUL delimiters', () => {
+    // `\`` is stashed before code-span detection, so its placeholder ends up
+    // INSIDE the span's stashed content. A single restore pass left the inner
+    // placeholder's NUL bytes in the outgoing message.
+    const out = mdToPlainText('Text `a\\`b` Ende');
+    assert.equal(out, 'Text a`b Ende');
+    assert.ok(!out.includes('\x00'), 'no control characters may reach Sendblue');
+  });
+
+  it('never emits a NUL even when the input contains one', () => {
+    assert.ok(!mdToPlainText('vor\x00nach `code`').includes('\x00'));
+  });
+});
+
+describe('mdToPlainText — fences', () => {
+  it('shelters tilde fences verbatim', () => {
+    assert.equal(mdToPlainText('~~~\nconst x = *5*;\n~~~'), 'const x = *5*;');
+  });
+
+  it('shelters a fence nested in a blockquote without rewriting the code', () => {
+    const out = mdToPlainText('> Beispiel\n>\n> ```\n> npm i -g *paket*\n> ```');
+    assert.ok(out.includes('npm i -g *paket*'), 'code must survive verbatim');
+    assert.ok(!out.includes('```'));
+  });
+
+  it('shelters a fence indented inside a list item', () => {
+    const out = mdToPlainText('1. Schritt\n\n      ```js\n      const a = *1*;\n      ```');
+    assert.ok(out.includes('const a = *1*;'));
+    assert.ok(!out.includes('```'));
+  });
+
+  it('survives CRLF input', () => {
+    const out = mdToPlainText('Hier:\r\n```js\r\nconst a = *b*;\r\n```\r\nFertig.');
+    assert.ok(out.includes('const a = *b*;'), 'closer must match despite the \\r');
+    assert.ok(!out.includes('\r'));
+  });
+
+  it('keeps trailing prose when an unclosed fence line is really inline prose', () => {
+    // "``` fertig" is a sentence continuing after an inline ``` mention; the
+    // whole line used to be dropped. A bare language tag still goes.
+    assert.ok(mdToPlainText('```js\ncode\n``` fertig').includes('fertig'));
+    assert.ok(!mdToPlainText('```python\ncode').includes('python'));
+  });
+});
+
+describe('mdToPlainText — GFM tables', () => {
+  it('accepts single-dash and colon-aligned delimiter rows', () => {
+    assert.equal(mdToPlainText('| Feld | Wert |\n| - | - |\n| A | 1 |'), 'A: 1');
+    assert.equal(mdToPlainText('| Feld | Wert |\n| :- | -: |\n| A | 1 |'), 'A: 1');
+  });
+
+  it('keeps cells a ragged row has beyond the header', () => {
+    const out = mdToPlainText('| k | v |\n| --- | --- |\n| a | 1 | ZUVIEL |');
+    assert.ok(out.includes('ZUVIEL'), 'surplus cells must not vanish silently');
+  });
+});
+
+describe('mdToPlainText — blockquote paragraphs', () => {
+  it('does not merge two quoted paragraphs into one line', () => {
+    // The `>` separator used to be \s, which matches the newline.
+    assert.equal(mdToPlainText('> Zitat\n>\n> Zweiter Absatz'), '» Zitat\n»\n» Zweiter Absatz');
+  });
+});
+
+describe('mdToPlainText — links', () => {
+  it('degrades non-http links and images instead of leaking the syntax', () => {
+    const out = mdToPlainText('![Bild](https://e.com/i.png) und [Mail](mailto:a@b.de)');
+    assert.ok(!out.includes(']('), 'raw link syntax leaked');
+    assert.ok(!out.includes('!['));
+    assert.ok(out.includes('Bild (https://e.com/i.png)'));
+    assert.ok(out.includes('Mail (mailto:a@b.de)'));
+  });
+
+  it('unwraps autolinks', () => {
+    assert.equal(mdToPlainText('Siehe <https://e.com/d>'), 'Siehe https://e.com/d');
+  });
+});
+
+describe('renderAnswerBubbles — degradation covers every field, not just text', () => {
+  it('strips markdown from the choice card, follow-ups, attachments and disclaimer', () => {
+    const out = renderAnswer({
+      text: 'Kurz **fett**.',
+      interactive: {
+        kind: 'choice',
+        question: '**Welche Variante** willst du?',
+        rationale: 'Siehe [Doku](https://e.com/d) und `code`.',
+        options: [
+          { label: '__Option A__', value: 'a' },
+          { label: 'Option ~~B~~', value: 'b' },
+        ],
+      },
+      followUps: [{ prompt: 'Was kostet *Variante A*?' }],
+      attachments: [{ kind: 'image', altText: '**Diagramm**', url: 'https://e.com/i.png' }],
+      disclaimer: '_Ohne Gewaehr_',
+    } as unknown as SemanticAnswer);
+
+    for (const leak of ['**', '__', '~~', '](', '`']) {
+      assert.ok(!out.includes(leak), `raw markdown leaked: ${leak}`);
+    }
+    assert.ok(out.includes('Welche Variante willst du?'));
+    assert.ok(out.includes('• Option A'));
+    assert.ok(out.includes('Was kostet Variante A?'));
+    assert.ok(out.includes('Diagramm: https://e.com/i.png'));
+    assert.ok(out.includes('Ohne Gewaehr'));
+  });
+
+  it('keeps a multi-line option label on one bullet line', () => {
+    const out = renderAnswer({
+      text: '',
+      interactive: {
+        kind: 'choice',
+        question: 'Wann?',
+        options: [{ label: '# Titel\nZweite Zeile', value: 'a' }],
+      },
+    } as unknown as SemanticAnswer);
+    assert.ok(out.includes('• TITEL Zweite Zeile'), out);
+  });
+});

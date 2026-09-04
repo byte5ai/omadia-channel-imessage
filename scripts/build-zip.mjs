@@ -14,8 +14,14 @@
  *   3) verify dist/plugin.js exists
  *   4) zip into out/<id>-<version>.zip
  *
- * Run `npm run typecheck` separately for the tsc gate (needs the @omadia
- * type sources from the adjacent omadia checkout — see README).
+ * This script does NOT typecheck. `npm run build` runs `typecheck && test`
+ * first so a red compiler cannot produce an uploadable zip — hub versions are
+ * immutable, so a bad zip is a permanent artefact. Use `npm run build:only`
+ * to skip the gate deliberately (e.g. while iterating on packaging).
+ *
+ * The gate matters most when the adjacent omadia checkout is stale: the tsc
+ * `paths` alias points at `harness-channel-sdk/dist`, so an un-rebuilt SDK
+ * silently typechecks against an outdated API surface (see README).
  */
 
 import { spawnSync } from 'node:child_process';
@@ -84,7 +90,18 @@ const stageDir = join(pkgRoot, 'out', stageName);
 rmSync(stageDir, { recursive: true, force: true });
 mkdirSync(stageDir, { recursive: true });
 
-const INCLUDE = ['manifest.yaml', 'package.json', 'dist', 'assets', 'README.md', 'LICENSE', 'NOTICE'];
+// README.de.md ships too: it is the primary-language doc for this connector,
+// and `.md` is in the host's served-extension allowlist.
+const INCLUDE = [
+  'manifest.yaml',
+  'package.json',
+  'dist',
+  'assets',
+  'README.md',
+  'README.de.md',
+  'LICENSE',
+  'NOTICE',
+];
 for (const entry of INCLUDE) {
   const src = join(pkgRoot, entry);
   if (!existsSync(src)) continue;

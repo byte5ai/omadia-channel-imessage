@@ -128,7 +128,14 @@ export class SendblueClient {
     } catch {
       body = {};
     }
-    if (body.status === 'ERROR' || (body.error_code !== undefined && body.error_code !== null)) {
+    // `error_code` counts as an error only when it carries a real code. The
+    // docs use `null` for "no error", but `0` and `""` are the same statement
+    // in a JSON API, and treating them as failures would raise on a message
+    // that was in fact delivered — sending the user a bogus error bubble.
+    const errorCode = body.error_code;
+    const hasErrorCode =
+      errorCode !== undefined && errorCode !== null && errorCode !== 0 && errorCode !== '';
+    if (body.status === 'ERROR' || hasErrorCode) {
       return {
         ok: false,
         retryable: false,

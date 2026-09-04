@@ -72,7 +72,7 @@ describe('GET /a/:token (fallback page)', () => {
     assert.ok(html.includes('Di 10:00'));
     // no app handoff yet — the page must not advertise a dead omadia:// link
     assert.ok(!html.includes('omadia://'), 'no app-handoff button');
-    assert.equal(entry.state, 'open', 'GET is side-effect free');
+    assert.equal(entry.state, 'open', 'GET must never answer the question');
   });
 
   it('renders 404 / answered / expired states as friendly pages', async () => {
@@ -285,7 +285,11 @@ describe('GET /a/:token — link-preview (Open Graph) tags', () => {
     }
   });
 
-  it('omits og:url / og:image when no public base URL is configured', async () => {
+  // Mirrors how plugin.ts actually wires the router when `public_base_url` is
+  // empty: `ogAssetsPath` is passed UNCONDITIONALLY, only the base URL is
+  // null. Omitting both made the banner route 404 in the test while it serves
+  // a 200 in production — the assertion held for the wrong reason.
+  it('omits og:url / og:image when no public base URL is configured, but still serves the banner', async () => {
     const app = express();
     const bare = new AnswerStore({ ttlMs: HOUR, now: () => nowMs });
     app.use(
@@ -293,6 +297,8 @@ describe('GET /a/:token — link-preview (Open Graph) tags', () => {
       createAnswersRouter({
         store: bare,
         routePrefix: '/api/imessage',
+        publicBaseUrl: null,
+        ogAssetsPath: path.resolve(process.cwd(), 'assets/og'),
         log: () => undefined,
         onReply: async () => undefined,
       }),
@@ -309,8 +315,11 @@ describe('GET /a/:token — link-preview (Open Graph) tags', () => {
       assert.ok(html.includes('og:title'));
       assert.ok(!html.includes('og:url'));
       assert.ok(!html.includes('og:image'));
+      // The banner is independent of the OG tags: it is still served, it is
+      // simply never referenced because there is no absolute origin to build
+      // an og:image URL from.
       const img = await fetch(`http://127.0.0.1:${addr.port}/api/imessage/a/assets/preview.jpg`);
-      assert.equal(img.status, 404);
+      assert.equal(img.status, 200);
     } finally {
       srv.close();
     }

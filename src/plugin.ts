@@ -255,10 +255,18 @@ async function handleTurn(
   turn: IncomingTurn,
   links: AnswerLinkContext | null,
 ): Promise<void> {
-  // Fire-and-forget typing indicator (best-effort, never throws).
-  void client.sendTypingIndicator(turn.conversationId).then((ok) => {
-    if (!ok) core.log('debug', 'iMessage typing indicator failed (ignored)');
-  });
+  // Fire-and-forget typing indicator (best-effort, never throws). The .catch
+  // covers a throw inside the log callback itself, which would otherwise
+  // surface as an unhandled rejection and take the process down under
+  // --unhandled-rejections=strict.
+  void client
+    .sendTypingIndicator(turn.conversationId)
+    .then((ok) => {
+      if (!ok) core.log('debug', 'iMessage typing indicator failed (ignored)');
+    })
+    .catch(() => {
+      /* best-effort: never let the indicator affect the turn */
+    });
 
   // US7 — most-specific key first: a binding on the sender's E.164 wins,
   // then a binding on the line itself (the key the channel directory lists),
@@ -298,16 +306,20 @@ async function handleTurn(
     for (const content of bubbles) {
       await client.sendMessage({ number: turn.conversationId, content });
     }
-    // A successful send clears a previously surfaced send error.
-    if (state.lastError) patchState(state, { lastError: null });
+    // A successful send clears a previously surfaced send error and takes the
+    // channel back out of the error state.
+    if (state.lastError) patchState(state, { lastError: null, status: 'connected' });
   } catch (err) {
     core.log('error', 'failed to handle iMessage turn', {
       error: (err as Error).message,
       conversationId: turn.conversationId,
     });
     // Surface the failure to the operator — Sendblue has no auth handshake,
-    // so a bad API key pair only ever manifests here at send time.
-    patchState(state, { lastError: (err as Error).message });
+    // so a bad API key pair only ever manifests here at send time. The status
+    // moves with it: the admin UI renders a red dot for 'error', and leaving
+    // the status 'connected' showed a green "Aktiv" pill directly above the
+    // red error banner. The next successful send clears both.
+    patchState(state, { lastError: (err as Error).message, status: 'error' });
     try {
       await client.sendMessage({
         number: turn.conversationId,

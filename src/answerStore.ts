@@ -91,15 +91,20 @@ export class AnswerStore {
       state: 'open',
     };
     this.entries.set(entry.token, entry);
-    if (this.entries.size > this.cap) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest !== undefined) this.entries.delete(oldest);
-    }
+    this.evictToCap(entry.token);
     return entry;
   }
 
-  /** Look up an entry, transitioning it to `expired` lazily if its TTL passed. */
+  /**
+   * Look up an entry, transitioning it to `expired` lazily if its TTL passed.
+   *
+   * Sweeps first: retention used to be enforced only inside `create()`, so a
+   * channel that issued no further cards kept serving entries indefinitely
+   * past their retention horizon instead of letting them fall back to a plain
+   * 404. The map is capped, so the scan is bounded.
+   */
   get(token: string): AnswerEntry | undefined {
+    this.sweep();
     const entry = this.entries.get(token);
     if (!entry) return undefined;
     this.expireIfDue(entry);
@@ -107,10 +112,36 @@ export class AnswerStore {
   }
 
   /**
+   * Enforce {@link cap}, preferring entries that are already terminal
+   * (`answered` / `expired`) over live ones.
+   *
+   * Evicting strictly by insertion order dropped the oldest entry even when it
+   * was still `open` — a user's live question would 404 with no explanation
+   * while entries that exist only to render a nicer "already answered" page
+   * were kept. Terminal entries are dropped oldest-first; only if that is not
+   * enough does an `open` entry go, again oldest-first.
+   */
+  private evictToCap(keepToken: string): void {
+    if (this.entries.size <= this.cap) return;
+    const terminal: string[] = [];
+    const open: string[] = [];
+    for (const [token, entry] of this.entries) {
+      if (token === keepToken) continue;
+      (entry.state === 'open' ? open : terminal).push(token);
+    }
+    for (const token of [...terminal, ...open]) {
+      if (this.entries.size <= this.cap) break;
+      this.entries.delete(token);
+    }
+  }
+
+  /**
    * Accept a reply for `token`. Validates state and that `value` is one of
    * the card's options; on success the entry is terminally `answered`.
-   * GET stays side-effect free — only this transitions state on behalf of
-   * the user (Apple's link-preview crawler must never "answer").
+   * This is the ONLY transition to `answered` made on behalf of the user, so
+   * a GET can never answer a question (Apple's link-preview crawler must not).
+   * `get()` does mutate — the lazy TTL transition and the retention sweep —
+   * so GET is not literally side-effect free, only reply-free.
    */
   reply(token: string, value: string): ReplyOutcome {
     const entry = this.entries.get(token);

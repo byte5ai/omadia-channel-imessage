@@ -62,7 +62,7 @@ It needs an LLM provider assigned to the orchestrator first.
 | `api_v2_base_url` | Default `https://api.sendblue.com` (typing indicator — note `.com`). |
 | `allowlist` | Optional comma-separated E.164 numbers; empty = everyone. |
 | `public_base_url` | Optional public HTTPS origin of the omadia instance. Enables **answer links** (see below); empty = disabled. |
-| `answer_link_ttl_hours` | How long an answer link stays answerable. Default `24`. |
+| `answer_link_ttl_hours` | How long an answer link stays answerable. Default `24`. See the state caveat below — the TTL is an upper bound, not a guarantee. |
 
 ## Answer links (interactive choices)
 
@@ -78,14 +78,32 @@ POSTed back and injected into the **same iMessage conversation session** — the
 answer arrives in iMessage as usual. Replying by text always keeps working;
 a text reply invalidates the pending link (a later tap shows "already
 answered"). The token is 128-bit random, single-use, TTL-bound, and the only
-authorization (it is delivered exclusively to the recipient's number). `GET`
-is side-effect free, so Apple's link-preview crawler can never answer.
+authorization (it is delivered exclusively to the recipient's number). Only
+`POST` ever records an answer, so Apple's link-preview crawler can never
+answer by fetching the page.
 
 After a pick, the page replaces the question with a confirmation and offers a
 `sms:` link back to the configured `from_number` — the thread the answer
 arrives in — so the user is handed back to the conversation instead of being
 left in the browser. The page follows omadia's Lume design language; it carries
 its own token copy because it ships without external assets.
+
+**State is in-process, and that is a real limit.** Open answer links and the
+webhook dedupe set live in plain in-memory maps inside the plugin instance —
+nothing is persisted and nothing is shared. Two consequences worth knowing
+before you rely on answer links:
+
+- **A restart voids every outstanding link.** Redeploying, restarting the
+  host, or toggling the plugin drops the store, so a link the user received a
+  minute ago answers with "link not found" regardless of the configured TTL.
+  Treat `answer_link_ttl_hours` as an upper bound.
+- **More than one middleware replica breaks links and can duplicate turns.** A
+  token minted on replica A is unknown to replica B, so a tap that the load
+  balancer routes to B 404s. Likewise, Sendblue retries an inbound delivery up
+  to 3x; a retry landing on a replica that never saw the original is not
+  recognised as a duplicate and drives the orchestrator a second time.
+
+Run this channel on a single replica until the store is persisted.
 
 **Link preview.** The answer link is sent as a second bubble containing only
 the URL — iMessage unfurls a link into a preview card only when the message is

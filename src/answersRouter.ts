@@ -16,8 +16,11 @@ import type { AnswerEntry, AnswerStore } from './answerStore.js';
  *   POST /answers/:token/reply  accept the selection, drive the turn detached
  *
  * Authorization is the capability token itself — the link was delivered only
- * to the recipient's iMessage number. GET is side-effect free by contract
- * (Apple's preview crawler fetches the page); only the POST transitions state.
+ * to the recipient's iMessage number. GET can never ANSWER a question (Apple's
+ * preview crawler fetches the page); only the POST transitions an entry to
+ * `answered`. GET is not literally side-effect free — a lookup applies the
+ * lazy TTL transition and the retention sweep — but neither is observable as
+ * a reply, which is the property that matters here.
  */
 
 export interface AnswersRouterDeps {

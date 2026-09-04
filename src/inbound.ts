@@ -104,7 +104,15 @@ export function evaluateInbound(raw: unknown, opts: InboundOptions): InboundResu
   const groupId = typeof p.group_id === 'string' ? p.group_id.trim() : '';
   if (p.message_type === 'group' || groupId.length > 0) return { drop: 'group-unsupported' };
 
-  if (typeof p.sendblue_number === 'string' && fromNumber === p.sendblue_number) {
+  // Normalised on both sides: the provider is not guaranteed to format
+  // `from_number` and `sendblue_number` identically, and a raw string compare
+  // would let a formatting difference alone defeat the self-echo guard and
+  // make the channel answer itself.
+  if (
+    typeof p.sendblue_number === 'string' &&
+    p.sendblue_number.trim().length > 0 &&
+    normalizePhone(fromNumber) === normalizePhone(p.sendblue_number)
+  ) {
     return { drop: 'self' };
   }
 
@@ -141,9 +149,18 @@ export function evaluateInbound(raw: unknown, opts: InboundOptions): InboundResu
   return { turn };
 }
 
-/** Digits-only normalisation so `+49 170 ...`, `0049170...` variants compare. */
+/**
+ * Digits-only normalisation so `+49 170 …` and `0049 170 …` compare equal:
+ * `00` is the international access prefix, i.e. the spelled-out form of `+`.
+ *
+ * A NATIONAL trunk zero (`0170 …`) deliberately does NOT compare equal — the
+ * country is unknowable from the string alone, and guessing it would let an
+ * allowlist entry match a number in a different country. The setup field asks
+ * for E.164 for exactly this reason.
+ */
 export function normalizePhone(value: string): string {
-  return value.replace(/\D/g, '');
+  const digits = value.replace(/\D/g, '');
+  return digits.startsWith('00') ? digits.slice(2) : digits;
 }
 
 /** Extension → attachment kind/mediaType, best-effort. */

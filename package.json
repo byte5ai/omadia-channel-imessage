@@ -1,6 +1,6 @@
 {
   "name": "@omadia/channel-imessage",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "private": true,
   "type": "module",
   "main": "dist/plugin.js",
@@ -13,7 +13,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "node scripts/build-zip.mjs",
+    "build": "npm run typecheck && npm test && node scripts/build-zip.mjs",
+    "build:only": "node scripts/build-zip.mjs",
     "test": "node scripts/test.mjs",
     "clean": "rm -rf dist out .test-build"
   },

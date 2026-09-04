@@ -46,7 +46,10 @@ interface Harness {
 /** Next scripted answer(s) the fake orchestrator returns (FIFO, repeats last). */
 let scriptedAnswers: SemanticAnswer[] = [{ text: 'Antwort vom Agenten.' }];
 
-async function startHarness(config: Record<string, string> = {}): Promise<Harness> {
+async function startHarness(
+  config: Record<string, string> = {},
+  extraServices: Record<string, unknown> = {},
+): Promise<Harness> {
   const chatCalls: ChatCall[] = [];
   const sends: SendblueSend[] = [];
   const directories: ChannelKeyDirectory[] = [];
@@ -91,6 +94,7 @@ async function startHarness(config: Record<string, string> = {}): Promise<Harnes
       register: (d: ChannelKeyDirectory) => directories.push(d),
       unregister: (t: string) => unregistered.push(t),
     },
+    ...extraServices,
   };
 
   const ctx = {
@@ -109,21 +113,32 @@ async function startHarness(config: Record<string, string> = {}): Promise<Harnes
   } as unknown as PluginContext;
 
   let publicRouter: Router | undefined;
+  let publicPrefix: string | undefined;
+  let publicChannelId: string | undefined;
   const core = {
     log: (_level: string, msg: string) => {
       logs.push(msg);
     },
-    registerRouter: (_channelId: string, _prefix: string, router: Router) => {
+    registerRouter: (channelId: string, prefix: string, router: Router) => {
       publicRouter = router;
+      publicPrefix = prefix;
+      publicChannelId = channelId;
     },
   };
 
   const handle = await activate(ctx, core as never);
   assert.ok(publicRouter, 'plugin must register its public router');
 
+  // Pin the mount point rather than hand-typing it below. The operator's
+  // Sendblue webhook URL and the core's public-path exemption both hardcode
+  // `/api/imessage`, so a changed prefix is a production 404 — and a test that
+  // mounts at a literal path would stay green through it.
+  assert.equal(publicPrefix, '/api/imessage', 'public router prefix is load-bearing');
+  assert.equal(publicChannelId, 'imessage-channel', 'router must be owned by the channel id');
+
   const app = express();
   app.use(express.json()); // the omadia host parses JSON on the root app
-  app.use('/api/imessage', publicRouter);
+  app.use(publicPrefix, publicRouter);
   const server: Server = app.listen(0);
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const addr = server.address();
@@ -372,6 +387,122 @@ describe('plugin.activate — answer-link round trip', () => {
       assert.ok(!bubble.includes('/api/imessage/a/'), 'no link without public_base_url');
     } finally {
       await h.close();
+    }
+  });
+});
+
+describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
+  interface Probe {
+    channelType: string;
+    channelKey: string;
+  }
+
+  /** A ChatAgent that records the turns it was asked to handle. */
+  function recordingAgent(calls: string[], label: string) {
+    return {
+      chat: async (input: { userMessage: string }): Promise<SemanticAnswer> => {
+        calls.push(`${label}:${input.userMessage}`);
+        return { text: `von ${label}` };
+      },
+    };
+  }
+
+  async function runWithResolver(
+    resolve: (channelType: string, channelKey: string) => unknown,
+  ): Promise<{ probes: Probe[]; harness: Harness }> {
+    const probes: Probe[] = [];
+    const harness = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: (channelType: string, channelKey: string) => {
+            probes.push({ channelType, channelKey });
+            return resolve(channelType, channelKey);
+          },
+        },
+      },
+    );
+    return { probes, harness };
+  }
+
+  it('probes the sender key before the line key, and a bound sender wins', async () => {
+    const bound: string[] = [];
+    const { probes, harness } = await runWithResolver((_t, key) =>
+      key === SENDER
+        ? { decision: 'bound', chatAgent: recordingAgent(bound, 'sender-agent') }
+        : { decision: 'reject' },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => bound.length === 1, 'bound agent handled the turn');
+      // Most-specific first: a bound sender must short-circuit before the line
+      // is even asked about.
+      assert.deepEqual(probes, [{ channelType: 'imessage', channelKey: SENDER }]);
+      assert.equal(harness.chatCalls.length, 0, 'the default agent must not run');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('falls back to a binding on the line when the sender is unbound', async () => {
+    const lineCalls: string[] = [];
+    const { probes, harness } = await runWithResolver((_t, key) =>
+      key === LINE
+        ? { decision: 'bound', chatAgent: recordingAgent(lineCalls, 'line-agent') }
+        : { decision: 'reject' },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => lineCalls.length === 1, 'line-bound agent handled the turn');
+      assert.deepEqual(probes.map((p) => p.channelKey), [SENDER, LINE]);
+      assert.equal(harness.chatCalls.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('prefers an explicit binding over a platform fallback', async () => {
+    const fallback: string[] = [];
+    const boundCalls: string[] = [];
+    const { harness } = await runWithResolver((_t, key) =>
+      key === SENDER
+        ? { decision: 'fallback', chatAgent: recordingAgent(fallback, 'fallback-agent') }
+        : { decision: 'bound', chatAgent: recordingAgent(boundCalls, 'line-agent') },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => boundCalls.length === 1, 'bound agent won over the fallback');
+      assert.equal(fallback.length, 0, 'a fallback must never beat an explicit binding');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('uses the remembered fallback when nothing is explicitly bound', async () => {
+    const fallback: string[] = [];
+    const { harness } = await runWithResolver((_t, key) =>
+      key === SENDER
+        ? { decision: 'fallback', chatAgent: recordingAgent(fallback, 'fallback-agent') }
+        : { decision: 'reject' },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => fallback.length === 1, 'fallback agent handled the turn');
+      assert.equal(harness.chatCalls.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('swallows a resolver error and uses the default agent — a hiccup never drops a turn', async () => {
+    const { harness } = await runWithResolver(() => {
+      throw new Error('resolver exploded');
+    });
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => harness.chatCalls.length === 1, 'default agent handled the turn');
+    } finally {
+      await harness.close();
     }
   });
 });
