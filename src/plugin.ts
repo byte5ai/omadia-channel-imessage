@@ -35,10 +35,19 @@ const DEDUPE_CAP = 512;
 /**
  * Channel-plugin entry. The kernel's dynamic channel resolver imports this
  * module and calls the exported `activate(ctx, core)` (ChannelPlugin "shape
- * 1"). We mount the Sendblue receive-webhook via `core.registerRouter` (the
- * router lands verbatim on the root Express app — publicly reachable, exactly
- * what a provider webhook needs) and return a handle the kernel closes on
- * deactivate/uninstall.
+ * 1"). We mount the Sendblue receive-webhook and the answer-link routes via
+ * `ctx.routes.register` with `auth: 'custom'` and return a handle the kernel
+ * closes on deactivate/uninstall.
+ *
+ * Why `ctx.routes.register` and not `core.registerRouter`: every `/api/*`
+ * request passes the host's operator-session gate first, and neither Sendblue
+ * nor a recipient tapping an answer link has a session. The host serves a
+ * plugin route without one only when the manifest declares the prefix under
+ * `permissions.public_paths` AND the operator has granted it — and it only
+ * counts prefixes registered through `ctx.routes`. A router mounted with
+ * `core.registerRouter` stays behind the gate and answers 401 to every
+ * delivery. Until the operator grants `/api/imessage`, that is also what
+ * these routes answer.
  */
 export async function activate(ctx: PluginContext, core: CoreApi): Promise<ChannelHandle> {
   const channelId = ctx.agentId;
@@ -161,7 +170,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
           conversationId: entry.conversationId,
           channelType: CHANNEL_TYPE,
           channelKey: entry.conversationId,
-          userRef: { kind: 'imessage-handle', id: entry.conversationId },
+          userRef: { kind: 'custom', id: entry.conversationId },
           text: option.value,
           metadata: { via: 'answer-link' },
           rawEvent: { source: 'answer-link', token: entry.token },
@@ -171,7 +180,11 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     }),
   );
 
-  core.registerRouter(channelId, ROUTE_PREFIX, router);
+  // `auth: 'custom'` — the plugin authenticates every request itself: the
+  // webhook with the timing-safe shared secret, the answer-link routes with
+  // their single-use capability token. ROUTE_PREFIX must stay inside the
+  // manifest's `permissions.public_paths` declaration or this call throws.
+  const disposePublicRoutes = ctx.routes.register(ROUTE_PREFIX, router, { auth: 'custom' });
 
   // Contribute the configured line to the operator channels dashboard
   // (`GET /api/v1/operator/channels`) so it is a pickable binding key instead
@@ -227,10 +240,11 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
 
   return {
     async close() {
-      // The webhook route auto-503s on deactivation; the admin routes are
-      // disposed explicitly, then the dedupe structure is released. The
-      // directory contribution is dropped so /operator/channels stops
-      // listing this line once the plugin is deactivated.
+      // Both route registrations are disposed explicitly, then the dedupe
+      // structure is released. The directory contribution is dropped so
+      // /operator/channels stops listing this line once the plugin is
+      // deactivated.
+      disposePublicRoutes();
       disposeAdminRoutes();
       directoryRegistry?.unregister(CHANNEL_TYPE);
       seen.clear();

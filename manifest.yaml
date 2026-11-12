@@ -15,7 +15,7 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.2.14" # === package.json "version"
+  version: "0.3.0" # === package.json "version"
   description:
     "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
     Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link
@@ -30,8 +30,14 @@ identity:
   categories:
     - "communication"
 
+# compat.core is checked against the host's @omadia/plugin-api version. The
+# floor is the first release after the host started claiming
+# permissions.public_paths for channel plugins (byte5ai/omadia#1616). On an
+# older host the public routes below could be declared but never served, so
+# every Sendblue delivery would answer 401 — refusing the install is the
+# honest failure.
 compat:
-  core: ">=1.0 <2.0"
+  core: ">=1.47.0 <2.0"
   node: ">=20"
 
 depends_on: []
@@ -96,7 +102,16 @@ setup:
       same token there too — the plugin also accepts the secret from a request
       header.
 
-      ### 4. Answer links (optional, recommended)
+      ### 4. Grant the public path
+      Sendblue and the people tapping an answer link have no omadia login, so
+      this plugin asks to serve `/api/imessage` without an operator session.
+      The install dialog asks for that grant; if you skipped it, open the
+      plugin page → **Grants** and grant `/api/imessage`. Until you do, every
+      route under it — the webhook included — is not reachable at all and
+      Sendblue's deliveries fail. The plugin authenticates each request itself
+      (webhook secret, single-use answer-link token).
+
+      ### 5. Answer links (optional, recommended)
       iMessage cannot render choice buttons. When you set **Public base URL**
       (the public HTTPS origin of this Omadia instance, e.g.
       `https://omadia.example.com`), an answer with a choice card additionally
@@ -112,12 +127,12 @@ setup:
       > on one replica is unknown to the others) and can process an inbound
       > message twice. Run this channel on a single replica.
 
-      ### 5. Sandbox note
+      ### 6. Sandbox note
       On Sendblue's **free/sandbox tier** you share a line: recipients must
       have **texted the line first** / be verified contacts before the API can
       message them. A paid dedicated line has no such restriction.
 
-      ### 6. Privacy note (read before enabling)
+      ### 7. Privacy note (read before enabling)
       **All message content transits Sendblue's infrastructure** — both
       directions, including media. Sendblue is a third-party relay, not an
       Apple-sanctioned API. Enable this channel deliberately (opt-in), inform
@@ -157,7 +172,17 @@ setup:
       dasselbe Token ein — das Plugin akzeptiert das Secret auch aus einem
       Request-Header.
 
-      ### 4. Antwort-Links (optional, empfohlen)
+      ### 4. Öffentlichen Pfad freigeben
+      Sendblue und die Personen, die einen Antwort-Link antippen, haben keinen
+      omadia-Login. Das Plugin bittet deshalb darum, `/api/imessage` ohne
+      Operator-Sitzung ausliefern zu dürfen. Der Installationsdialog fragt
+      diese Freigabe ab; wurde sie übersprungen, öffne die Plugin-Seite →
+      **Freigaben** und gib `/api/imessage` frei. Bis dahin ist keine Route
+      darunter erreichbar — auch der Webhook nicht — und die Zustellungen von
+      Sendblue schlagen fehl. Jede Anfrage authentifiziert das Plugin selbst
+      (Webhook-Secret, einmalig gültiges Antwort-Link-Token).
+
+      ### 5. Antwort-Links (optional, empfohlen)
       iMessage kann keine Auswahl-Buttons darstellen. Wenn du die **Öffentliche
       Basis-URL** setzt (der öffentliche HTTPS-Origin dieser Omadia-Instanz,
       z.B. `https://omadia.example.com`), enthält eine Antwort mit
@@ -174,13 +199,13 @@ setup:
       > Replica ist den anderen unbekannt) und eingehende Nachrichten können
       > doppelt verarbeitet werden. Diesen Channel auf einer Replica betreiben.
 
-      ### 5. Sandbox-Hinweis
+      ### 6. Sandbox-Hinweis
       Im **Free-/Sandbox-Tarif** von Sendblue teilst du dir eine Line:
       Empfänger müssen die Nummer **zuerst anschreiben** bzw. verifizierte
       Kontakte sein, bevor die API sie erreichen darf. Eine bezahlte eigene
       Line hat diese Einschränkung nicht.
 
-      ### 6. Datenschutz-Hinweis (vor dem Aktivieren lesen)
+      ### 7. Datenschutz-Hinweis (vor dem Aktivieren lesen)
       **Sämtlicher Nachrichteninhalt läuft über die Infrastruktur von
       Sendblue** — in beide Richtungen, inklusive Medien. Sendblue ist ein
       Dritt-Relay, keine von Apple sanktionierte API. Aktiviere den Channel
@@ -276,8 +301,19 @@ setup:
 # Permissions. No memory / graph access — the dedupe set is in-process only.
 # network.outbound lists the two Sendblue API hosts (send-message lives on
 # api.sendblue.co, the typing indicator on api.sendblue.com).
+#
+# public_paths: the prefix this plugin asks to serve WITHOUT an operator
+# session. Sendblue posts the receive-webhook with no cookie, and an answer
+# link is opened from an iMessage bubble in a plain browser. Declaring is not
+# granting — the host serves the prefix only after the operator consents
+# (install dialog, or plugin page → Grants). Every route under it
+# authenticates itself: the webhook with the shared secret, the answer-link
+# routes with their single-use capability token. The admin UI lives under
+# /api/imessage-channel and stays behind the session gate.
 # ---------------------------------------------------------------------------
 permissions:
+  public_paths:
+    - "/api/imessage"
   memory:
     reads: []
     writes: []
@@ -302,9 +338,10 @@ admin_ui_path: "/api/imessage-channel/admin/index.html"
 
 # ---------------------------------------------------------------------------
 # Channel block (schema section 14). Sendblue delivers inbound messages via a
-# public webhook the plugin mounts through CoreApi.registerRouter under
-# /api/imessage. The route below is descriptive (operator summary); the
-# actual mount happens at activate(). verify_signature stays false — Sendblue
+# public webhook the plugin mounts through ctx.routes.register (auth: custom)
+# under /api/imessage — the prefix declared in permissions.public_paths. The
+# routes below are descriptive (operator summary); the actual mount happens at
+# activate(). verify_signature stays false — Sendblue
 # has no HMAC signing; the plugin verifies a shared secret carried in the URL
 # path (or any request header) instead, timing-safe.
 #

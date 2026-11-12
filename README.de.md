@@ -45,11 +45,17 @@ unterstützt und verworfen.
 
 Ein Channel-Plugin (`kind: channel`). Der omadia-Kernel aktiviert es aus der
 `manifest.yaml` und ruft das exportierte `activate(ctx, core)` auf. Das Plugin
-mountet über `core.registerRouter` einen öffentlichen Webhook unter
+mountet über `ctx.routes.register` mit `auth: 'custom'` einen öffentlichen
+Webhook unter
 
 ```
 POST /api/imessage/webhook/:token
 ```
+
+Sendblue hat keinen omadia-Login. Das Manifest deklariert deshalb
+`/api/imessage` unter `permissions.public_paths`; omadia liefert dieses Präfix
+erst dann ohne Operator-Sitzung aus, wenn der Operator es freigegeben hat (siehe
+[Installation](#installation)).
 
 Jeder eingehende Sendblue-Webhook wird timing-sicher gegen das Shared-Secret
 geprüft (das Pfadsegment `:token` — oder ein beliebiger Request-Header-Wert —
@@ -70,10 +76,23 @@ Es braucht zuerst einen LLM-Provider, der dem Orchestrator zugewiesen ist.
 3. Generiere selbst ein langes Zufallstoken als Webhook-Secret (z.B.
    `openssl rand -hex 32`).
 4. Fülle die Setup-Felder (unten) aus und starte das Plugin.
-5. Trage im Sendblue-Dashboard den Receive-Webhook ein:
+5. Gib den öffentlichen Pfad frei. Der Installationsdialog fragt, ob das Plugin
+   `/api/imessage` ohne Operator-Sitzung ausliefern darf; wurde das
+   übersprungen, öffne die Plugin-Seite → **Freigaben** und erteile die Freigabe
+   dort. Bis dahin ist keine Route unter `/api/imessage` erreichbar — die
+   Zustellungen von Sendblue und jeder Antwort-Link schlagen fehl. Jede dieser
+   Anfragen authentifiziert das Plugin selbst (Webhook-Secret, einmalig
+   gültiges Antwort-Link-Token); die Admin-UI unter `/api/imessage-channel`
+   gehört nicht zur Freigabe und bleibt hinter dem Login.
+6. Trage im Sendblue-Dashboard den Receive-Webhook ein:
    `https://<PUBLIC_BASE_URL>/api/imessage/webhook/<webhook_secret>` Bietet
    Sendblue zusätzlich ein Webhook-Secret-Feld an, trage dort dasselbe Token
    ein.
+
+**Host-Version:** Benötigt einen omadia-Host mit `@omadia/plugin-api` 1.47.0
+oder neuer (`compat.core` im Manifest). Ältere Hosts liefern die öffentlichen
+Pfade eines Channel-Plugins nicht aus; sie lehnen die Installation ab, statt
+jeden Webhook mit 401 zu beantworten.
 
 **Sandbox-Hinweis:** Im Free-/Sandbox-Tarif von Sendblue teilst du dir eine Line
 — Empfänger müssen die Nummer zuerst anschreiben bzw. verifiziert sein, bevor

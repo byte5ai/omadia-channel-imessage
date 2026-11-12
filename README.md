@@ -34,7 +34,7 @@ A channel plugin (`kind: channel`). The omadia kernel activates it from `manifes
 POST /api/imessage/webhook/:token
 ```
 
-via `core.registerRouter`. Every inbound Sendblue webhook is verified with a timing-safe shared-secret check (the `:token` path segment — or any request-header value — must equal the configured `webhook_secret`), answered with `200` immediately, and processed asynchronously: status callbacks / echoes / groups / duplicates are filtered, the message becomes an `IncomingTurn` (`channelType: imessage`), the orchestrator answers, and the rendered plain-text reply is sent back through `POST {api_base_url}/api/send-message`.
+via `ctx.routes.register` with `auth: 'custom'`. Sendblue has no omadia login, so the manifest declares `/api/imessage` under `permissions.public_paths`; omadia serves that prefix without an operator session only once the operator has granted it (see [Install](#install)). Every inbound Sendblue webhook is verified with a timing-safe shared-secret check (the `:token` path segment — or any request-header value — must equal the configured `webhook_secret`), answered with `200` immediately, and processed asynchronously: status callbacks / echoes / groups / duplicates are filtered, the message becomes an `IncomingTurn` (`channelType: imessage`), the orchestrator answers, and the rendered plain-text reply is sent back through `POST {api_base_url}/api/send-message`.
 
 It needs an LLM provider assigned to the orchestrator first.
 
@@ -44,9 +44,12 @@ It needs an LLM provider assigned to the orchestrator first.
 2. Create a [Sendblue](https://sendblue.com) account, note your line number (E.164) and copy the **API Key ID** / **API Secret Key** from the dashboard.
 3. Generate a long random webhook secret yourself (e.g. `openssl rand -hex 32`).
 4. Fill in the setup fields (below) and start the plugin.
-5. In the Sendblue dashboard, register the receive webhook:
+5. Grant the public path. The install dialog asks whether the plugin may serve `/api/imessage` without an operator session; if you skipped it, open the plugin page → **Grants** and grant it there. Until you do, no route under `/api/imessage` is reachable — Sendblue's deliveries and every answer link fail. The plugin authenticates each of those requests itself (webhook secret, single-use answer-link token); the admin UI under `/api/imessage-channel` is not part of the grant and stays behind the login.
+6. In the Sendblue dashboard, register the receive webhook:
    `https://<PUBLIC_BASE_URL>/api/imessage/webhook/<webhook_secret>`
    If Sendblue offers a separate webhook-secret field, put the same token there too.
+
+**Host version:** needs an omadia host whose `@omadia/plugin-api` is 1.47.0 or newer (`compat.core` in the manifest). Older hosts do not serve a channel plugin's public paths; they refuse the install instead of answering every webhook with 401.
 
 **Sandbox note:** on Sendblue's free/sandbox tier you share a line — recipients must have texted the line first / be verified before the API can message them.
 

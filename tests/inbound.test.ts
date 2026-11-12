@@ -34,7 +34,7 @@ describe('evaluateInbound — mapping', () => {
     assert.equal(t.channelType, 'imessage');
     assert.equal(t.conversationId, '+491701234567');
     assert.equal(t.channelKey, '+491701234567');
-    assert.deepEqual(t.userRef, { kind: 'imessage-handle', id: '+491701234567' });
+    assert.deepEqual(t.userRef, { kind: 'custom', id: '+491701234567' });
     assert.equal(t.text, 'Hallo');
     assert.equal(t.attachments, undefined);
     assert.deepEqual(t.metadata, { service: 'iMessage' });
