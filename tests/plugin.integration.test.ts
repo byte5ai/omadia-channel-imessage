@@ -42,6 +42,8 @@ interface RouteRegistration {
 
 interface Harness {
   base: string;
+  /** Base URL of the session-gated admin API (`…/api/status`). */
+  adminBase: string;
   /** Every `ctx.routes.register` call the plugin made, in order. */
   registrations: RouteRegistration[];
   /** Prefixes the plugin handed to `core.registerRouter` (must stay empty). */
@@ -157,6 +159,11 @@ async function startHarness(
   const app = express();
   app.use(express.json()); // the omadia host parses JSON before the plugin router
   app.use(publicRegistration.prefix, publicRegistration.router);
+  // The admin router is mounted bare: the host's session gate is not under
+  // test here, the status the operator sees is.
+  const adminRegistration = registrations.find((r) => r !== publicRegistration);
+  assert.ok(adminRegistration, 'plugin must register its admin router');
+  app.use(adminRegistration.prefix, adminRegistration.router);
   const server: Server = app.listen(0);
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const addr = server.address();
@@ -164,6 +171,7 @@ async function startHarness(
 
   return {
     base: `http://127.0.0.1:${addr.port}/api/imessage`,
+    adminBase: `http://127.0.0.1:${addr.port}${adminRegistration.prefix}`,
     registrations,
     coreRouterPrefixes,
     chatCalls,
@@ -560,13 +568,73 @@ describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
     }
   });
 
-  it('swallows a resolver error and uses the default agent — a hiccup never drops a turn', async () => {
+  /** What the operator sees on the admin page. */
+  async function channelStatus(h: Harness): Promise<{ status: string; lastError: string | null }> {
+    const res = await fetch(`${h.adminBase}/api/status`);
+    const body = (await res.json()) as { status: string; lastError: string | null };
+    return { status: body.status, lastError: body.lastError };
+  }
+
+  it('refuses a conversation every key rejects — no agent runs, the sender is told, the status stays connected', async () => {
+    const { probes, harness } = await runWithResolver(() => ({ decision: 'reject' }));
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => harness.sends.length === 1, 'refusal notice sent');
+      // Both keys were asked before giving up.
+      assert.deepEqual(probes.map((p) => p.channelKey), [SENDER, LINE]);
+      // byte5ai/omadia#1598: a rejected conversation is refused. It must not be
+      // handed to the default agent, whose own refusal used to come back as
+      // "an error occurred, try again".
+      assert.equal(harness.chatCalls.length, 0, 'the default agent must not run');
+      const notice = String(harness.sends[0]?.body.content);
+      assert.match(notice, /kein Agent zugewiesen/);
+      assert.doesNotMatch(notice, /versuche es erneut/, 'retrying cannot help an unbound conversation');
+      assert.equal(harness.sends[0]?.body.number, SENDER);
+      // A missing binding is not a channel fault.
+      assert.deepEqual(await channelStatus(harness), { status: 'connected', lastError: null });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('refuses the turn when the resolver throws — never another orchestrator', async () => {
     const { harness } = await runWithResolver(() => {
       throw new Error('resolver exploded');
     });
     try {
       await postWebhook(harness.base, SECRET, inbound());
-      await waitFor(() => harness.chatCalls.length === 1, 'default agent handled the turn');
+      await waitFor(() => harness.sends.length === 1, 'failure notice sent');
+      // Whether a binding exists is unknown, so no agent may answer in its
+      // place. A resolver hiccup is transient: "try again" is honest here.
+      assert.equal(harness.chatCalls.length, 0, 'the default agent must not run');
+      assert.match(String(harness.sends[0]?.body.content), /versuche es erneut/);
+      assert.ok(
+        harness.logs.some((l) => l.includes('the channel resolver failed')),
+        'the resolver failure must reach the log',
+      );
+      assert.deepEqual(await channelStatus(harness), { status: 'connected', lastError: null });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('answers a later turn once the conversation is bound', async () => {
+    const bound: string[] = [];
+    let isBound = false;
+    const { harness } = await runWithResolver(() =>
+      isBound
+        ? { decision: 'bound', chatAgent: recordingAgent(bound, 'line-agent') }
+        : { decision: 'reject' },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound({ message_handle: 'm-unbound' }));
+      await waitFor(() => harness.sends.length === 1, 'refusal notice sent');
+      // The resolver is asked per turn — a binding added afterwards takes
+      // effect without reactivating the channel.
+      isBound = true;
+      await postWebhook(harness.base, SECRET, inbound({ message_handle: 'm-bound' }));
+      await waitFor(() => bound.length === 1, 'bound agent handled the second turn');
+      assert.equal(harness.sends[1]?.body.content, 'von line-agent');
     } finally {
       await harness.close();
     }

@@ -15,11 +15,13 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.3.0" # === package.json "version"
+  version: "0.3.1" # === package.json "version"
+  # Every text an operator sees is an { en, de } map (byte5ai/omadia#1401). A
+  # bare string would be read as English and shown as written in every UI
+  # language.
   description:
-    "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den
-    Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link
-    zugestellt (Web-Auswahlseite)."
+    en: "iMessage channel via the Sendblue REST API; routes iMessage chats into the omadia orchestrator. Interactive choice questions are delivered as an answer link (web selection page)."
+    de: "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link zugestellt (Web-Auswahlseite)."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
@@ -219,79 +221,96 @@ setup:
   fields:
     - key: "api_key_id"
       type: "secret"
-      label: "Sendblue API Key ID"
+      label:
+        en: "Sendblue API Key ID"
+        de: "Sendblue API Key ID"
       help:
-        "API Key ID aus dem Sendblue-Dashboard (wird als Header sb-api-key-id
-        gesendet)."
+        en: "API Key ID from the Sendblue dashboard (sent as the sb-api-key-id header)."
+        de: "API Key ID aus dem Sendblue-Dashboard (wird als Header sb-api-key-id gesendet)."
       required: true
 
     - key: "api_secret_key"
       type: "secret"
-      label: "Sendblue API Secret Key"
+      label:
+        en: "Sendblue API Secret Key"
+        de: "Sendblue API Secret Key"
       help:
-        "API Secret Key aus dem Sendblue-Dashboard (wird als Header
-        sb-api-secret-key gesendet)."
+        en: "API Secret Key from the Sendblue dashboard (sent as the sb-api-secret-key header)."
+        de: "API Secret Key aus dem Sendblue-Dashboard (wird als Header sb-api-secret-key gesendet)."
       required: true
 
     - key: "from_number"
       type: "string"
-      label: "Absender-Nummer (Sendblue-Line)"
+      label:
+        en: "Sender number (Sendblue line)"
+        de: "Absender-Nummer (Sendblue-Line)"
       help:
-        "Deine Sendblue-Line im E.164-Format, z.B. +15122164639. Von dieser
-        Nummer sendet der Bot."
+        en: "Your Sendblue line in E.164 format, e.g. +15122164639. The bot sends from this number."
+        de: "Deine Sendblue-Line im E.164-Format, z.B. +15122164639. Von dieser Nummer sendet der Bot."
       required: true
 
     - key: "webhook_secret"
       type: "secret"
-      label: "Webhook-Secret"
+      label:
+        en: "Webhook secret"
+        de: "Webhook-Secret"
       help:
-        "Selbst generiertes langes Zufallstoken (z.B. openssl rand -hex 32).
-        Muss identisch in der Sendblue-Webhook-URL als letztes Pfadsegment
-        stehen."
+        en: "A long random token you generate yourself (e.g. openssl rand -hex 32). It must appear unchanged as the last path segment of the Sendblue webhook URL."
+        de: "Selbst generiertes langes Zufallstoken (z.B. openssl rand -hex 32). Muss identisch in der Sendblue-Webhook-URL als letztes Pfadsegment stehen."
       required: true
 
     - key: "api_base_url"
       type: "url"
-      label: "API-Basis-URL (optional)"
+      label:
+        en: "API base URL (optional)"
+        de: "API-Basis-URL (optional)"
       help:
-        "Sendblue REST-API-Basis für send-message. Nur ändern, wenn Sendblue
-        eine andere Basis vorgibt."
+        en: "Sendblue REST API base for send-message. Change it only if Sendblue specifies a different base."
+        de: "Sendblue REST-API-Basis für send-message. Nur ändern, wenn Sendblue eine andere Basis vorgibt."
       required: false
       default: "https://api.sendblue.co"
 
     - key: "api_v2_base_url"
       type: "url"
-      label: "API-v2-Basis-URL (optional)"
+      label:
+        en: "API v2 base URL (optional)"
+        de: "API-v2-Basis-URL (optional)"
       help:
-        "Sendblue-Basis für den Typing-Indicator (beachte: .com, nicht .co)."
+        en: "Sendblue base for the typing indicator (note: .com, not .co)."
+        de: "Sendblue-Basis für den Typing-Indicator (beachte: .com, nicht .co)."
       required: false
       default: "https://api.sendblue.com"
 
     - key: "allowlist"
       type: "string"
-      label: "Zugelassene Nummern (optional)"
+      label:
+        en: "Allowed numbers (optional)"
+        de: "Zugelassene Nummern (optional)"
       help:
-        "Komma-getrennte Telefonnummern (E.164, z.B. +491701234567), die mit dem
-        Bot chatten dürfen. Leer = alle erlaubt."
+        en: "Comma-separated phone numbers (E.164, e.g. +491701234567) that may chat with the bot. Empty = everyone is allowed."
+        de: "Komma-getrennte Telefonnummern (E.164, z.B. +491701234567), die mit dem Bot chatten dürfen. Leer = alle erlaubt."
       required: false
       default: ""
 
     - key: "public_base_url"
       type: "url"
-      label: "Öffentliche Basis-URL (optional)"
+      label:
+        en: "Public base URL (optional)"
+        de: "Öffentliche Basis-URL (optional)"
       help:
-        "Öffentlicher HTTPS-Origin dieser Omadia-Instanz (z.B.
-        https://omadia.example.com). Aktiviert Antwort-Links für
-        Auswahlfragen: Auswahl per Web-Seite/App statt Text-Antwort. Leer =
-        deaktiviert."
+        en: "Public HTTPS origin of this omadia instance (e.g. https://omadia.example.com). Enables answer links for choice questions: the pick happens on a web page instead of a text reply. Empty = disabled."
+        de: "Öffentlicher HTTPS-Origin dieser Omadia-Instanz (z.B. https://omadia.example.com). Aktiviert Antwort-Links für Auswahlfragen: Auswahl per Web-Seite/App statt Text-Antwort. Leer = deaktiviert."
       required: false
       default: ""
 
     - key: "answer_link_ttl_hours"
       type: "string"
-      label: "Antwort-Link TTL in Stunden (optional)"
+      label:
+        en: "Answer link TTL in hours (optional)"
+        de: "Antwort-Link TTL in Stunden (optional)"
       help:
-        "Wie lange ein Antwort-Link beantwortbar bleibt. Standard: 24."
+        en: "How long an answer link stays answerable. Default: 24."
+        de: "Wie lange ein Antwort-Link beantwortbar bleibt. Standard: 24."
       required: false
       default: "24"
 

@@ -181,9 +181,12 @@ Das Plugin trägt die konfigurierte Line ins Operator-Channels-Dashboard ein
 (`GET /api/v1/operator/channels`) — die Line ist damit ein auswählbarer
 Binding-Key. Ein Agent-Binding auf die **Line** (`from_number`) wirkt als
 Default für alle Unterhaltungen auf dieser Line; ein Binding auf eine konkrete
-**Absender-Nummer** (E.164) gewinnt dagegen. Ungebundene Unterhaltungen fallen
-auf den Plattform-Fallback-Agenten zurück, danach auf den
-Standard-Orchestrator.
+**Absender-Nummer** (E.164) gewinnt dagegen. Eine Unterhaltung ohne eines der
+beiden Bindings beantwortet der Plattform-Fallback-Agent. Ist auch der nicht
+gesetzt, wird der Turn abgelehnt: Der Absender erfährt, dass der Unterhaltung
+kein Agent zugewiesen ist, und es läuft kein Orchestrator. Auf einem Host ohne
+Multi-Agent-Registry beantwortet dessen einziger Orchestrator jede
+Unterhaltung.
 
 ## Datenschutz & Datentransit
 

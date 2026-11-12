@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.1
+
+- **A conversation without an Agent is refused in the chat**
+  (byte5ai/omadia#1598). When the host's binding resolver rejects every key of
+  a turn — no binding on the sender, none on the line, no platform fallback
+  Agent — the sender is told that no Agent is assigned to the conversation.
+  Before, the turn went to the default agent, whose own refusal came back as
+  "an error occurred, please try again" and turned the channel status red
+  although the channel was working.
+- **A resolver error refuses the turn as well** instead of handing it to the
+  default agent: whether a binding exists is unknown at that point, and another
+  orchestrator would answer with its own grants. The sender gets the
+  "try again" notice. The default agent still answers on a host that publishes
+  no resolver.
+- Neither refusal changes the channel status; no typing indicator is shown for
+  a refused turn.
+- **Manifest texts are `{ en, de }` maps** (byte5ai/omadia#1401):
+  `identity.description` and the label and help of all nine setup fields. They
+  were German-only strings and showed in German in an English UI.
+- README: the agent-binding section describes the refusal.
+
 ## 0.3.0
 
 The channel no longer needs anything from the omadia core to be reachable. Its

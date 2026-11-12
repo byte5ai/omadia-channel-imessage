@@ -131,8 +131,11 @@ The plugin contributes its configured line to the operator channels dashboard
 (`GET /api/v1/operator/channels`), so the line is a pickable binding key.
 Binding an Agent to the **line** (`from_number`) makes it the default for every
 conversation on that line; a binding on a specific **sender E.164** wins over
-it. Unbound conversations fall back to the platform fallback Agent, then to the
-default orchestrator.
+it. A conversation with neither binding is answered by the platform fallback
+Agent. If none is set either, the turn is refused: the sender is told that no
+Agent is assigned to the conversation, and no orchestrator runs. On a host
+without the multi-Agent registry, its single orchestrator answers every
+conversation.
 
 ## Privacy & data transit
 
