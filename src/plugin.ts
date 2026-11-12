@@ -32,13 +32,30 @@ const ROUTE_PREFIX = '/api/imessage';
 const ADMIN_ROUTE_PREFIX = '/api/imessage-channel/admin';
 const DEDUPE_CAP = 512;
 
+/** Sent when a turn failed on our side — retrying is the right advice. */
+const TURN_FAILED_MESSAGE =
+  '⚠️ Entschuldigung, dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.';
+/** Sent when no Agent is assigned to the conversation — retrying cannot help,
+ *  so the text says who can. */
+const NO_AGENT_MESSAGE =
+  'Dieser Unterhaltung ist kein Agent zugewiesen. Bitte wende dich an den Betreiber dieses Dienstes.';
+
 /**
  * Channel-plugin entry. The kernel's dynamic channel resolver imports this
  * module and calls the exported `activate(ctx, core)` (ChannelPlugin "shape
- * 1"). We mount the Sendblue receive-webhook via `core.registerRouter` (the
- * router lands verbatim on the root Express app — publicly reachable, exactly
- * what a provider webhook needs) and return a handle the kernel closes on
- * deactivate/uninstall.
+ * 1"). We mount the Sendblue receive-webhook and the answer-link routes via
+ * `ctx.routes.register` with `auth: 'custom'` and return a handle the kernel
+ * closes on deactivate/uninstall.
+ *
+ * Why `ctx.routes.register` and not `core.registerRouter`: every `/api/*`
+ * request passes the host's operator-session gate first, and neither Sendblue
+ * nor a recipient tapping an answer link has a session. The host serves a
+ * plugin route without one only when the manifest declares the prefix under
+ * `permissions.public_paths` AND the operator has granted it — and it only
+ * counts prefixes registered through `ctx.routes`. A router mounted with
+ * `core.registerRouter` stays behind the gate and answers 401 to every
+ * delivery. Until the operator grants `/api/imessage`, that is also what
+ * these routes answer.
  */
 export async function activate(ctx: PluginContext, core: CoreApi): Promise<ChannelHandle> {
   const channelId = ctx.agentId;
@@ -161,7 +178,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
           conversationId: entry.conversationId,
           channelType: CHANNEL_TYPE,
           channelKey: entry.conversationId,
-          userRef: { kind: 'imessage-handle', id: entry.conversationId },
+          userRef: { kind: 'custom', id: entry.conversationId },
           text: option.value,
           metadata: { via: 'answer-link' },
           rawEvent: { source: 'answer-link', token: entry.token },
@@ -171,7 +188,11 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     }),
   );
 
-  core.registerRouter(channelId, ROUTE_PREFIX, router);
+  // `auth: 'custom'` — the plugin authenticates every request itself: the
+  // webhook with the timing-safe shared secret, the answer-link routes with
+  // their single-use capability token. ROUTE_PREFIX must stay inside the
+  // manifest's `permissions.public_paths` declaration or this call throws.
+  const disposePublicRoutes = ctx.routes.register(ROUTE_PREFIX, router, { auth: 'custom' });
 
   // Contribute the configured line to the operator channels dashboard
   // (`GET /api/v1/operator/channels`) so it is a pickable binding key instead
@@ -227,10 +248,11 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
 
   return {
     async close() {
-      // The webhook route auto-503s on deactivation; the admin routes are
-      // disposed explicitly, then the dedupe structure is released. The
-      // directory contribution is dropped so /operator/channels stops
-      // listing this line once the plugin is deactivated.
+      // Both route registrations are disposed explicitly, then the dedupe
+      // structure is released. The directory contribution is dropped so
+      // /operator/channels stops listing this line once the plugin is
+      // deactivated.
+      disposePublicRoutes();
       disposeAdminRoutes();
       directoryRegistry?.unregister(CHANNEL_TYPE);
       seen.clear();
@@ -255,10 +277,27 @@ async function handleTurn(
   turn: IncomingTurn,
   links: AnswerLinkContext | null,
 ): Promise<void> {
+  // US7 — most-specific key first: a binding on the sender's E.164 wins,
+  // then a binding on the line itself (the key the channel directory lists),
+  // then the platform fallback Agent. Without a published resolver the
+  // default agent answers.
+  const resolved = resolveAgentForTurn(
+    ctx,
+    CHANNEL_TYPE,
+    [turn.conversationId, state.me?.fromNumber],
+    defaultAgent,
+  );
+  if ('refused' in resolved) {
+    await refuseTurn(core, client, state, turn, resolved);
+    return;
+  }
+  const agent = resolved.agent;
+
   // Fire-and-forget typing indicator (best-effort, never throws). The .catch
   // covers a throw inside the log callback itself, which would otherwise
   // surface as an unhandled rejection and take the process down under
-  // --unhandled-rejections=strict.
+  // --unhandled-rejections=strict. Started only once an agent is known — a
+  // refused turn shows no "typing".
   void client
     .sendTypingIndicator(turn.conversationId)
     .then((ok) => {
@@ -268,15 +307,6 @@ async function handleTurn(
       /* best-effort: never let the indicator affect the turn */
     });
 
-  // US7 — most-specific key first: a binding on the sender's E.164 wins,
-  // then a binding on the line itself (the key the channel directory lists),
-  // then the platform fallback Agent, then the default.
-  const agent = resolveAgentForTurn(
-    ctx,
-    CHANNEL_TYPE,
-    [turn.conversationId, state.me?.fromNumber],
-    defaultAgent,
-  );
   try {
     const answer = await agent.chat({
       userMessage: turn.text,
@@ -321,13 +351,54 @@ async function handleTurn(
     // red error banner. The next successful send clears both.
     patchState(state, { lastError: (err as Error).message, status: 'error' });
     try {
-      await client.sendMessage({
-        number: turn.conversationId,
-        content: '⚠️ Entschuldigung, dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.',
-      });
+      await client.sendMessage({ number: turn.conversationId, content: TURN_FAILED_MESSAGE });
     } catch {
       /* original error already logged — don't mask it with a send failure */
     }
+  }
+}
+
+/**
+ * Answer a turn no Agent may handle (byte5ai/omadia#1598). The host refuses a
+ * conversation its binding resolver rejects rather than letting another
+ * orchestrator answer it; this channel says so in the chat instead of running
+ * the turn into the default agent, whose refusal used to surface as a generic
+ * "an error occurred, try again" bubble and a red channel status.
+ *
+ * The channel status is left alone on purpose: a missing binding is an
+ * operator configuration gap, not a fault of this channel. Only a failing
+ * send — the one thing that IS this channel's job here — is surfaced.
+ */
+async function refuseTurn(
+  core: CoreApi,
+  client: SendblueClient,
+  state: ChannelState,
+  turn: IncomingTurn,
+  refusal: AgentRefusal,
+): Promise<void> {
+  if (refusal.refused === 'unassigned') {
+    core.log('warn', 'iMessage turn refused: no Agent is assigned to this conversation', {
+      conversationId: turn.conversationId,
+    });
+  } else {
+    core.log('error', 'iMessage turn refused: the channel resolver failed', {
+      conversationId: turn.conversationId,
+      error: refusal.error,
+    });
+  }
+  try {
+    await client.sendMessage({
+      number: turn.conversationId,
+      // A resolver failure is transient, so "try again" is honest there; a
+      // conversation without an Agent stays without one until someone binds it.
+      content: refusal.refused === 'unassigned' ? NO_AGENT_MESSAGE : TURN_FAILED_MESSAGE,
+    });
+  } catch (err) {
+    core.log('error', 'failed to send the iMessage refusal notice', {
+      error: (err as Error).message,
+      conversationId: turn.conversationId,
+    });
+    patchState(state, { lastError: (err as Error).message, status: 'error' });
   }
 }
 
@@ -363,36 +434,49 @@ interface ChannelBindingResolver {
 const CHANNEL_RESOLVER_SERVICE = 'channelResolver';
 
 /**
+ * Why a turn has no Agent. `unassigned`: the resolver rejected every key — no
+ * binding and no platform fallback Agent. `resolver-failed`: the resolver
+ * threw, so whether a binding exists is unknown.
+ */
+type AgentRefusal =
+  | { readonly refused: 'unassigned' }
+  | { readonly refused: 'resolver-failed'; readonly error: string };
+
+/**
  * US7 per-turn Agent resolution. Routes a turn to the Agent the operator bound
- * to its `(channelType, channelKey)` via `channelResolver@1`, falling back to
- * `defaultAgent` when no binding (and no platform fallback Agent) matches OR
- * the resolver is not published (single-Agent / pre-US7 host). `channelKeys`
+ * to its `(channelType, channelKey)` via `channelResolver@1`. `channelKeys`
  * are tried most-specific first: a `bound` decision wins immediately, a
- * `fallback` is remembered and used only if no key is explicitly bound.
- * Resolver errors are swallowed (default agent used) so a hiccup never drops a
- * turn. Without this, every turn reaches the shared, fully-tooled singleton
- * regardless of which Agent the channel is bound to.
+ * `fallback` (the platform fallback Agent) is remembered and used only if no
+ * key is explicitly bound.
+ *
+ * `defaultAgent` answers only when the resolver is NOT published — a
+ * single-Agent host, where it is the deployment's one orchestrator. With a
+ * resolver, a turn nobody is bound to is refused (byte5ai/omadia#1598), and so
+ * is a turn whose resolution threw: answering it from another orchestrator
+ * would put an Agent in the conversation that the operator never assigned,
+ * with that Agent's grants. Same rule as the SDK's
+ * `resolveChatAgentForChannel`, kept local because it probes several keys.
  */
 function resolveAgentForTurn(
   ctx: PluginContext,
   channelType: string,
   channelKeys: ReadonlyArray<string | null | undefined>,
   defaultAgent: ChatAgent,
-): ChatAgent {
+): { readonly agent: ChatAgent } | AgentRefusal {
   const resolver = ctx.services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE);
-  if (!resolver) return defaultAgent;
+  if (!resolver) return { agent: defaultAgent };
   let fallback: ChatAgent | undefined;
   try {
     for (const key of channelKeys) {
       if (!key) continue;
       const decision = resolver.resolve(channelType, key);
-      if (decision.decision === 'bound' && decision.chatAgent) return decision.chatAgent;
+      if (decision.decision === 'bound' && decision.chatAgent) return { agent: decision.chatAgent };
       if (decision.decision === 'fallback' && decision.chatAgent) fallback ??= decision.chatAgent;
     }
-  } catch {
-    return defaultAgent;
+  } catch (err) {
+    return { refused: 'resolver-failed', error: err instanceof Error ? err.message : String(err) };
   }
-  return fallback ?? defaultAgent;
+  return fallback ? { agent: fallback } : { refused: 'unassigned' };
 }
 
 /** Parse the comma-separated allowlist into digits-only phone numbers. */

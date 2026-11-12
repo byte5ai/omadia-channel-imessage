@@ -137,7 +137,9 @@ export function evaluateInbound(raw: unknown, opts: InboundOptions): InboundResu
     conversationId: fromNumber,
     channelType: 'imessage',
     channelKey: fromNumber,
-    userRef: { kind: 'imessage-handle', id: fromNumber },
+    // `ChannelUserKind` is a closed union in the host SDK with no iMessage
+    // member; `custom` is its documented slot for channels outside the list.
+    userRef: { kind: 'custom', id: fromNumber },
     text: content,
     ...(attachment ? { attachments: [attachment] } : {}),
     metadata: {

@@ -7,7 +7,7 @@ import type { AnswerEntry, AnswerStore } from './answerStore.js';
 
 /**
  * Public answer-link routes (Phase 1 of the deep-link concept). Mounted onto
- * the channel's public router (same `core.registerRouter` mount as the
+ * the channel's public router (same `ctx.routes.register` mount as the
  * Sendblue webhook), so all paths below are relative to `/api/imessage`:
  *
  *   GET  /a/:token              HTML fallback page (also the OG-preview target)
@@ -58,8 +58,8 @@ export function createAnswersRouter(deps: AnswersRouterDeps): Router {
   const imageUrl =
     origin && deps.ogAssetsPath ? `${origin}${deps.routePrefix}/a/assets/preview.jpg` : null;
 
-  // Static banner for the iMessage link card (og:image). Lives under /a/ on
-  // purpose: the core's public-path exemption covers exactly webhook|a|answers.
+  // Static banner for the iMessage link card (og:image). Lives on the public
+  // router on purpose: Apple's preview crawler fetches it without a session.
   // No clash with /a/:token — Express 5 params match a single segment only.
   //
   // `root` is REQUIRED here, not cosmetic: without it `send` applies its

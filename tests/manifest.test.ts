@@ -70,16 +70,58 @@ describe('manifest.yaml ↔ mounted routes', () => {
     }
   });
 
-  it('pins the route prefix the core public-path exemption hardcodes', () => {
-    // The exemption in the host (middleware/src/auth/publicPaths.ts) matches
-    // /api/imessage/(webhook|a|answers). Changing either side alone is a 401.
+});
+
+describe('manifest.yaml ↔ public paths', () => {
+  const ROUTE_PREFIX = '/api/imessage';
+  const ADMIN_PREFIX = '/api/imessage-channel/admin';
+
+  // The entries of `permissions.public_paths`: the list items directly under
+  // the key, up to the next key of the permissions block.
+  const block = /^ {2}public_paths:\n((?: {4}- "[^"]+"\n)+)/m.exec(manifest);
+  const publicPaths = [...(block?.[1] ?? '').matchAll(/- "([^"]+)"/g)].map((m) => m[1] ?? '');
+
+  /** `child` is `parent` or sits beneath it on a segment boundary — the
+   *  host's own containment rule for public-path declarations. */
+  const isUnder = (child: string, parent: string): boolean =>
+    child === parent || child.startsWith(`${parent}/`);
+
+  it('declares the prefix the public router is registered at', () => {
+    // The host refuses `ctx.routes.register(prefix, …, { auth: 'custom' })`
+    // unless the prefix lies inside a declared public path, so a mismatch
+    // fails activation rather than serving a 401.
     assert.ok(pluginSrc.includes(`const ROUTE_PREFIX = '${ROUTE_PREFIX}'`));
-    for (const family of ['/webhook', '/a', '/answers']) {
+    assert.ok(
+      pluginSrc.includes("ctx.routes.register(ROUTE_PREFIX, router, { auth: 'custom' })"),
+      'the public router must be registered through ctx.routes with auth custom',
+    );
+    assert.ok(
+      publicPaths.some((p) => isUnder(ROUTE_PREFIX, p)),
+      `permissions.public_paths does not cover ${ROUTE_PREFIX} (declared: ${publicPaths.join(', ')})`,
+    );
+  });
+
+  it('declares nothing beyond the public router', () => {
+    assert.deepEqual(publicPaths, [ROUTE_PREFIX]);
+  });
+
+  it('covers every public route the channel block lists', () => {
+    const declared = [...manifest.matchAll(/^\s*- path:\s*"([^"]+)"/gm)].map((m) => m[1] ?? '');
+    assert.ok(declared.length > 0);
+    for (const route of declared) {
       assert.ok(
-        declared.some((p) => p.startsWith(`${ROUTE_PREFIX}${family}/`)),
-        `no declared route under the exempted family ${family}`,
+        publicPaths.some((p) => isUnder(route, p)),
+        `route ${route} is not under a declared public path — it would answer 401`,
       );
     }
+  });
+
+  it('keeps the admin UI outside every declared public path', () => {
+    assert.ok(pluginSrc.includes(`const ADMIN_ROUTE_PREFIX = '${ADMIN_PREFIX}'`));
+    assert.ok(
+      !publicPaths.some((p) => isUnder(ADMIN_PREFIX, p)),
+      'the admin UI must stay behind the operator session',
+    );
   });
 });
 

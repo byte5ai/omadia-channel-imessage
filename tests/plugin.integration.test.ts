@@ -33,8 +33,21 @@ interface SendblueSend {
   body: Record<string, unknown>;
 }
 
+interface RouteRegistration {
+  prefix: string;
+  router: Router;
+  options: { auth?: string; body?: string } | undefined;
+  disposed: boolean;
+}
+
 interface Harness {
   base: string;
+  /** Base URL of the session-gated admin API (`…/api/status`). */
+  adminBase: string;
+  /** Every `ctx.routes.register` call the plugin made, in order. */
+  registrations: RouteRegistration[];
+  /** Prefixes the plugin handed to `core.registerRouter` (must stay empty). */
+  coreRouterPrefixes: string[];
   chatCalls: ChatCall[];
   sends: SendblueSend[];
   directories: ChannelKeyDirectory[];
@@ -55,6 +68,8 @@ async function startHarness(
   const directories: ChannelKeyDirectory[] = [];
   const unregistered: string[] = [];
   const logs: string[] = [];
+  const registrations: RouteRegistration[] = [];
+  const coreRouterPrefixes: string[] = [];
 
   const realFetch = globalThis.fetch;
   // The SendblueClient captures global fetch at construction — stub BEFORE
@@ -109,36 +124,46 @@ async function startHarness(
     },
     config: { get: <T>(key: string): T | undefined => configMap[key] as T | undefined },
     services: { get: <T>(name: string): T | undefined => services[name] as T | undefined },
-    routes: { register: (_prefix: string, _router: Router) => () => undefined },
+    routes: {
+      register: (prefix: string, router: Router, options?: RouteRegistration['options']) => {
+        const registration: RouteRegistration = { prefix, router, options, disposed: false };
+        registrations.push(registration);
+        return () => {
+          registration.disposed = true;
+        };
+      },
+    },
   } as unknown as PluginContext;
 
-  let publicRouter: Router | undefined;
-  let publicPrefix: string | undefined;
-  let publicChannelId: string | undefined;
   const core = {
     log: (_level: string, msg: string) => {
       logs.push(msg);
     },
-    registerRouter: (channelId: string, prefix: string, router: Router) => {
-      publicRouter = router;
-      publicPrefix = prefix;
-      publicChannelId = channelId;
+    registerRouter: (_channelId: string, prefix: string) => {
+      coreRouterPrefixes.push(prefix);
     },
   };
 
   const handle = await activate(ctx, core as never);
-  assert.ok(publicRouter, 'plugin must register its public router');
 
-  // Pin the mount point rather than hand-typing it below. The operator's
-  // Sendblue webhook URL and the core's public-path exemption both hardcode
-  // `/api/imessage`, so a changed prefix is a production 404 — and a test that
-  // mounts at a literal path would stay green through it.
-  assert.equal(publicPrefix, '/api/imessage', 'public router prefix is load-bearing');
-  assert.equal(publicChannelId, 'imessage-channel', 'router must be owned by the channel id');
+  // The public router is the one registration that opts out of the host's
+  // session gate. Pin the mount point rather than hand-typing it below: the
+  // operator's Sendblue webhook URL and the manifest's
+  // `permissions.public_paths` declaration both name `/api/imessage`, so a
+  // changed prefix fails activation on the host — and a test that mounts at a
+  // literal path would stay green through it.
+  const publicRegistration = registrations.find((r) => r.options?.auth === 'custom');
+  assert.ok(publicRegistration, "plugin must register its public router with auth: 'custom'");
+  assert.equal(publicRegistration.prefix, '/api/imessage', 'public router prefix is load-bearing');
 
   const app = express();
-  app.use(express.json()); // the omadia host parses JSON on the root app
-  app.use(publicPrefix, publicRouter);
+  app.use(express.json()); // the omadia host parses JSON before the plugin router
+  app.use(publicRegistration.prefix, publicRegistration.router);
+  // The admin router is mounted bare: the host's session gate is not under
+  // test here, the status the operator sees is.
+  const adminRegistration = registrations.find((r) => r !== publicRegistration);
+  assert.ok(adminRegistration, 'plugin must register its admin router');
+  app.use(adminRegistration.prefix, adminRegistration.router);
   const server: Server = app.listen(0);
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const addr = server.address();
@@ -146,6 +171,9 @@ async function startHarness(
 
   return {
     base: `http://127.0.0.1:${addr.port}/api/imessage`,
+    adminBase: `http://127.0.0.1:${addr.port}${adminRegistration.prefix}`,
+    registrations,
+    coreRouterPrefixes,
     chatCalls,
     sends,
     directories,
@@ -185,6 +213,52 @@ const postWebhook = (base: string, token: string, body: unknown, headers: Record
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body),
   });
+
+describe('plugin.activate — route registration', () => {
+  it('mounts the public router through ctx.routes with auth custom, never core.registerRouter', async () => {
+    const h = await startHarness();
+    try {
+      // The host serves a route without an operator session only when it was
+      // registered through ctx.routes under a declared public path. A router
+      // handed to core.registerRouter stays behind the session gate and
+      // answers 401 to every Sendblue delivery.
+      assert.deepEqual(h.coreRouterPrefixes, []);
+      const custom = h.registrations.filter((r) => r.options?.auth === 'custom');
+      assert.deepEqual(
+        custom.map((r) => r.prefix),
+        ['/api/imessage'],
+      );
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('keeps the admin UI behind the session gate on its own prefix', async () => {
+    const h = await startHarness();
+    try {
+      const admin = h.registrations.find((r) => r.prefix === '/api/imessage-channel/admin');
+      assert.ok(admin, 'admin router must be registered');
+      // No options = the host default, auth: 'session'.
+      assert.equal(admin.options?.auth, undefined);
+      assert.ok(
+        !admin.prefix.startsWith('/api/imessage/'),
+        'admin prefix must not sit under the public path',
+      );
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('disposes every route registration on close', async () => {
+    const h = await startHarness();
+    await h.close();
+    assert.equal(h.registrations.length, 2);
+    assert.ok(
+      h.registrations.every((r) => r.disposed),
+      'a registration left undisposed keeps serving after deactivation',
+    );
+  });
+});
 
 describe('plugin.activate — webhook auth', () => {
   it('rejects a wrong secret with 401 and starts no turn', async () => {
@@ -494,13 +568,73 @@ describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
     }
   });
 
-  it('swallows a resolver error and uses the default agent — a hiccup never drops a turn', async () => {
+  /** What the operator sees on the admin page. */
+  async function channelStatus(h: Harness): Promise<{ status: string; lastError: string | null }> {
+    const res = await fetch(`${h.adminBase}/api/status`);
+    const body = (await res.json()) as { status: string; lastError: string | null };
+    return { status: body.status, lastError: body.lastError };
+  }
+
+  it('refuses a conversation every key rejects — no agent runs, the sender is told, the status stays connected', async () => {
+    const { probes, harness } = await runWithResolver(() => ({ decision: 'reject' }));
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => harness.sends.length === 1, 'refusal notice sent');
+      // Both keys were asked before giving up.
+      assert.deepEqual(probes.map((p) => p.channelKey), [SENDER, LINE]);
+      // byte5ai/omadia#1598: a rejected conversation is refused. It must not be
+      // handed to the default agent, whose own refusal used to come back as
+      // "an error occurred, try again".
+      assert.equal(harness.chatCalls.length, 0, 'the default agent must not run');
+      const notice = String(harness.sends[0]?.body.content);
+      assert.match(notice, /kein Agent zugewiesen/);
+      assert.doesNotMatch(notice, /versuche es erneut/, 'retrying cannot help an unbound conversation');
+      assert.equal(harness.sends[0]?.body.number, SENDER);
+      // A missing binding is not a channel fault.
+      assert.deepEqual(await channelStatus(harness), { status: 'connected', lastError: null });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('refuses the turn when the resolver throws — never another orchestrator', async () => {
     const { harness } = await runWithResolver(() => {
       throw new Error('resolver exploded');
     });
     try {
       await postWebhook(harness.base, SECRET, inbound());
-      await waitFor(() => harness.chatCalls.length === 1, 'default agent handled the turn');
+      await waitFor(() => harness.sends.length === 1, 'failure notice sent');
+      // Whether a binding exists is unknown, so no agent may answer in its
+      // place. A resolver hiccup is transient: "try again" is honest here.
+      assert.equal(harness.chatCalls.length, 0, 'the default agent must not run');
+      assert.match(String(harness.sends[0]?.body.content), /versuche es erneut/);
+      assert.ok(
+        harness.logs.some((l) => l.includes('the channel resolver failed')),
+        'the resolver failure must reach the log',
+      );
+      assert.deepEqual(await channelStatus(harness), { status: 'connected', lastError: null });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('answers a later turn once the conversation is bound', async () => {
+    const bound: string[] = [];
+    let isBound = false;
+    const { harness } = await runWithResolver(() =>
+      isBound
+        ? { decision: 'bound', chatAgent: recordingAgent(bound, 'line-agent') }
+        : { decision: 'reject' },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound({ message_handle: 'm-unbound' }));
+      await waitFor(() => harness.sends.length === 1, 'refusal notice sent');
+      // The resolver is asked per turn — a binding added afterwards takes
+      // effect without reactivating the channel.
+      isBound = true;
+      await postWebhook(harness.base, SECRET, inbound({ message_handle: 'm-bound' }));
+      await waitFor(() => bound.length === 1, 'bound agent handled the second turn');
+      assert.equal(harness.sends[1]?.body.content, 'von line-agent');
     } finally {
       await harness.close();
     }

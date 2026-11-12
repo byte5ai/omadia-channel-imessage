@@ -86,6 +86,9 @@
               <code>+15122164639</code>) als <code>from_number</code> eintragen.</li>
             <li><b>Webhook-Secret:</b> langes Zufallstoken generieren
               (<code>openssl rand -hex 32</code>) und im Plugin-Setup speichern.</li>
+            <li><b>Öffentlichen Pfad freigeben:</b> auf der Plugin-Seite unter
+              <b>Freigaben</b> den Pfad <code>/api/imessage</code> freigeben. Ohne
+              Freigabe beantwortet omadia jede Zustellung von Sendblue mit 401.</li>
             <li><b>Receive-Webhook:</b> die URL oben (mit deinem Secret als letztem
               Pfadsegment) im Sendblue-Dashboard als Webhook-URL eintragen.</li>
             <li><b>Sandbox-Hinweis:</b> im Free-Tarif müssen Empfänger die Line zuerst
