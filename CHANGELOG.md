@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.0
+
+Agents as colleagues (epic byte5ai/omadia#2042, issue #2). **Needs a kernel
+that provides the speaker, plain-text renderer, decoration registry and pace
+contracts (omadia#2045, #2086, #2087, branch S6): do not publish before that
+kernel runs on the target instance.**
+
+- **Answers render through the SDK plain-text renderer** (`renderPlainAnswer`).
+  A name line (`Mira:`) only where the speaker would be unclear (a second agent
+  spoke in the conversation, or the speaker changed), never on every message.
+  A consulted colleague's contribution is a plain `Mira: ...` paragraph. A kernel
+  `system` notice is its own text, not under an agent's name.
+- **Removed: follow-up lists (`💡 Du kannst auch fragen`) and the disclaimer
+  line.** They are not declared decorations for this channel. The AI disclosure
+  stays in the answer text as the operator's `ai_disclosure_frequency` renders it.
+- **Choice cards are numbered** (`1) ...`) and answered by replying with the
+  number; the plugin maps a bare number back to the option's value. The
+  "Bitte antworte mit einer der Optionen" line is gone.
+- **The choice answer link is no longer sent** while the decoration registry
+  does not declare `decision_card` for `imessage` (it lists Teams and web only).
+  Routes, store and settings are unchanged and the link returns once declared.
+- **One emitter.** Every message, an agent's answer or a notice of the channel,
+  carries its speaker (`system` for the channel's own notices) and leaves through
+  `src/emit.ts`; a test counts the `sendMessage` call sites.
+- **Agent selection.** The sender's number is passed to the channel resolver as
+  the user principal so the kernel can apply the user's `/agent <Name>` selection
+  ahead of a binding. `/agent ...` is sent to omadia unchanged (no parser in the
+  plugin; iMessage has no native commands) and the kernel's notice is shown.
+  Resolution ranks selection, then sender binding, then line binding, then the
+  default-agent entry; an unavailable agent is named in the kernel's system
+  notice and never replaced by another agent (INV-7).
+- **Pace.** The agent call runs through `runPacedTurn`: typing indicator, one
+  acknowledgement after about 8 s, no progress chatter. There is no reply window
+  (the webhook is answered at once).
+- README (EN, DE): per-agent identity is **not supported** (one Sendblue line
+  per installation; what multiple lines would take and why it is not built),
+  `/agent` selection, what an answer looks like, groups unsupported.
+- Tests: criterion 5 (emitter paths), 29/30 (plain text, channel parity),
+  31 (decoration registry), resolution order, pace with a manual clock. The
+  suite runner now aliases both the channel SDK and plugin-api dists
+  (`OMADIA_CHANNEL_SDK_DIST`, `OMADIA_PLUGIN_API_DIST`).
+
 ## 0.3.1
 
 - **A conversation without an Agent is refused in the chat**

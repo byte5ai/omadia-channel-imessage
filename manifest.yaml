@@ -15,13 +15,13 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.3.1" # === package.json "version"
+  version: "0.4.0" # === package.json "version"
   # Every text an operator sees is an { en, de } map (byte5ai/omadia#1401). A
   # bare string would be read as English and shown as written in every UI
   # language.
   description:
-    en: "iMessage channel via the Sendblue REST API; routes iMessage chats into the omadia orchestrator. Interactive choice questions are delivered as an answer link (web selection page)."
-    de: "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den Omadia-Orchestrator. Interaktive Auswahlfragen werden als Antwort-Link zugestellt (Web-Auswahlseite)."
+    en: "iMessage channel via the Sendblue REST API; routes iMessage chats into the omadia orchestrator. Users pick their agent with /agent <Name>; choices arrive as a numbered list answered by number."
+    de: "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den Omadia-Orchestrator. Nutzer wählen ihren Agenten mit /agent <Name>; Auswahlfragen kommen als nummerierte Liste und werden per Nummer beantwortet."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
@@ -113,7 +113,12 @@ setup:
       Sendblue's deliveries fail. The plugin authenticates each request itself
       (webhook secret, single-use answer-link token).
 
-      ### 5. Answer links (optional, recommended)
+      ### 5. Answer links (optional, currently inactive)
+      > Answer links are only sent where omadia's decoration registry declares
+      > the choice affordance for iMessage. It does not yet, so a choice
+      > arrives as a numbered list answered by number and the link is not sent.
+      > The setting below takes effect once omadia declares it.
+
       iMessage cannot render choice buttons. When you set **Public base URL**
       (the public HTTPS origin of this Omadia instance, e.g.
       `https://omadia.example.com`), an answer with a choice card additionally
@@ -184,7 +189,13 @@ setup:
       Sendblue schlagen fehl. Jede Anfrage authentifiziert das Plugin selbst
       (Webhook-Secret, einmalig gültiges Antwort-Link-Token).
 
-      ### 5. Antwort-Links (optional, empfohlen)
+      ### 5. Antwort-Links (optional, derzeit inaktiv)
+      > Antwort-Links werden nur gesendet, wo omadias Dekorations-Registry die
+      > Auswahl-Affordance für iMessage deklariert. Das tut sie noch nicht:
+      > Eine Auswahl kommt als nummerierte Liste, beantwortet per Nummer, und
+      > der Link wird nicht gesendet. Die Einstellung unten greift, sobald
+      > omadia es deklariert.
+
       iMessage kann keine Auswahl-Buttons darstellen. Wenn du die **Öffentliche
       Basis-URL** setzt (der öffentliche HTTPS-Origin dieser Omadia-Instanz,
       z.B. `https://omadia.example.com`), enthält eine Antwort mit

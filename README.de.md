@@ -114,9 +114,17 @@ die API sie erreichen darf.
 
 ## Antwort-Links (interaktive Auswahlfragen)
 
-iMessage kann keine Auswahl-Buttons darstellen. Ist `public_base_url` gesetzt,
-enthält eine Antwort mit interaktiver Auswahlkarte zusätzlich eine
-Capability-URL:
+> **Inaktiv, bis omadia es deklariert.** Seit 0.4.0 muss jedes Element, das der
+> Channel um eine Antwort legt, in omadias Dekorations-Registry deklariert sein.
+> Die Auswahl-Affordance ist nur für Teams und den Web-Chat deklariert, also
+> wird der Link für iMessage vorerst **nicht gesendet**; eine Auswahlkarte
+> kommt als nummerierte Liste an, und eine Antwort wie `2` beantwortet sie.
+> Routen und Code unten bleiben bestehen; der Link kehrt von selbst zurück,
+> sobald die Registry die Affordance für `imessage` deklariert.
+
+iMessage kann keine Auswahl-Buttons darstellen. Ist `public_base_url` gesetzt
+und die Affordance deklariert, enthält eine Antwort mit interaktiver
+Auswahlkarte zusätzlich eine Capability-URL:
 
 ```
 https://<public_base_url>/api/imessage/a/<token>
@@ -175,18 +183,91 @@ Routen (auf demselben öffentlichen Router wie das Webhook):
 | `GET /api/imessage/answers/:token` | Strukturierter JSON-Payload (API-Clients; ein Mobile-App-Handoff ist noch nicht angebunden). |
 | `POST /api/imessage/answers/:token/reply` | Nimmt `{ "value": … }` an; `202`, Turn läuft detached. |
 
+## Agenten als Kolleginnen und Kollegen
+
+### Einen Agenten erreichen: eine Line, `/agent <Name>`
+
+**Eine eigene Identität pro Agent unterstützt dieses Plugin nicht.** Eine
+Installation nutzt eine Sendblue-Line (`from_number`); alle Agenten antworten
+also von derselben Telefonnummer. Auf Providerseite ist mehr möglich: Sendblue
+erlaubt mehrere Lines pro Konto, wählt die Sende-Line über `from_number` und
+meldet die empfangende Line als `sendblue_number` im Inbound-Webhook. Ein Plugin
+könnte also eine Line je Agent betreiben. Dieses tut es nicht, weil:
+
+- jede weitere Line für den Betreiber eine eigene Sendblue-Line ist und der
+  Provider keine Multi-Line-Preise veröffentlicht (offenbar Vertriebsgespräch,
+  teils Enterprise-Funktion): aktuelle Sendblue-Konditionen prüfen;
+- Sessions, Antwort-Links und Allowlist heute auf der Absender-Nummer beruhen;
+  eine zweite Line braucht einen neuen Unterhaltungs-Key (Line + Absender),
+  sonst teilten zwei Agenten einen Chatverlauf;
+- omadia noch keinen Vertrag für „diese Line **ist** die Identität jenes
+  Agenten, vor der Auswahl eines Nutzers“ hat (siehe offene Fragen im
+  0.4.0-PR).
+
+Stattdessen wählt der Nutzer den Agenten per Text, im 1:1-Chat:
+
+```
+/agent Mira     Mira in dieser Unterhaltung verwenden
+/agent          meine Wahl aufheben (das Binding gilt wieder)
+/agents         die für mich hier verfügbaren Agenten auflisten
+```
+
+iMessage hat keine nativen Bot-Commands, das Plugin parst diese Eingaben daher
+**nicht**: Die Nachricht geht unverändert an omadia, die Management-Schicht
+speichert die Auswahl des Nutzers und antwortet mit einer kurzen System-Notiz.
+Wählbar sind nur Agenten, die diesem Nutzer in iMessage zur Verfügung stehen.
+Die Absender-Nummer wird als Nutzer mitgegeben, sodass zwei Personen, die
+dieselbe Line anschreiben, je ihren Agenten behalten, auch nach einem Neustart
+(die Auswahl liegt in omadia, nicht in diesem Plugin).
+
+### Wie eine Antwort aussieht
+
+Klartext, so wie ein Kollege schreibt:
+
+- der Antworttext; **keine Namenszeile**, solange ein Agent in der Unterhaltung
+  spricht. Eine Zeile `Mira:` erscheint nur, wenn ein zweiter Agent in der
+  Unterhaltung gesprochen hat oder der Sprecher gewechselt hat (der Verlauf
+  liegt im Speicher: nach einem Neustart kann die nächste Antwort eine Zeile zu
+  viel tragen, nie eine zu wenig);
+- ein vom Agenten befragter Kollege erscheint als schlichter Absatz
+  `Mira: ...`;
+- eine Meldung von omadia selbst (Agent deaktiviert, für dich nicht verfügbar,
+  ...) ist ein eigener Text, nie unter dem Namen eines Agenten;
+- eine Auswahl ist eine nummerierte Liste; die Antwort mit der Nummer
+  beantwortet sie;
+- die KI-Kennzeichnung ist Teil des Textes, wie es die Häufigkeits-Einstellung
+  des Betreibers vorgibt. Keine Folgefragen-Listen, Prüf-Badges, Quellen-Chips
+  oder „Kürzer / Mehr Details“; die Details bleiben in omadia und lassen sich in
+  Worten erfragen.
+
+Bei längerer Arbeit zeigt der Agent den Tippindikator, sagt nach etwa 8
+Sekunden einmal, dass er dran ist („Ich kümmere mich darum, das dauert einen
+Moment.“), und antwortet, wenn er fertig ist. Diese Bestätigung geht als
+System-Nachricht raus, weil der Channel die Identität des aufgelösten Agenten
+an dieser Stelle nicht kennt.
+
+### Gruppen
+
+Gruppenchats werden nicht unterstützt: Sie werden verworfen
+(`src/inbound.ts`), also ist in einer Gruppe kein Agent anwesend und es braucht
+keinen Roster-Provider. Agenten arbeiten nur in 1:1-Chats.
+
 ## Agent-Bindings (Operator-Channels-Dashboard)
 
 Das Plugin trägt die konfigurierte Line ins Operator-Channels-Dashboard ein
 (`GET /api/v1/operator/channels`) — die Line ist damit ein auswählbarer
-Binding-Key. Ein Agent-Binding auf die **Line** (`from_number`) wirkt als
-Default für alle Unterhaltungen auf dieser Line; ein Binding auf eine konkrete
-**Absender-Nummer** (E.164) gewinnt dagegen. Eine Unterhaltung ohne eines der
-beiden Bindings beantwortet der Plattform-Fallback-Agent. Ist auch der nicht
-gesetzt, wird der Turn abgelehnt: Der Absender erfährt, dass der Unterhaltung
-kein Agent zugewiesen ist, und es läuft kein Orchestrator. Auf einem Host ohne
-Multi-Agent-Registry beantwortet dessen einziger Orchestrator jede
-Unterhaltung.
+Binding-Key. Pro Turn fragt das Plugin omadias Channel-Resolver zuerst mit der
+Absender-Nummer, dann mit der Line und gibt den Absender als Nutzer mit. Die
+eigene Auswahl eines Nutzers (`/agent`) geht einem Binding vor. Von den Bindings
+gewinnt das auf die **Absender-Nummer** (E.164) gegen das auf die **Line**; ein
+Default-Agent-Eintrag gilt nur, wenn kein Binding greift. Darf der angesprochene
+oder gebundene Agent die Unterhaltung nicht bedienen (deaktiviert, gelöscht,
+für den Absender nicht verfügbar), erhält der Absender omadias System-Notiz mit
+dem Namen des Agenten, und kein anderer Agent antwortet an seiner Stelle.
+Spricht gar nichts einen Agenten an, erfährt der Absender, dass der
+Unterhaltung kein Agent zugewiesen ist, und es läuft kein Orchestrator. Auf
+einem Host ohne Multi-Agent-Registry beantwortet dessen einziger Orchestrator
+jede Unterhaltung.
 
 ## Datenschutz & Datentransit
 
