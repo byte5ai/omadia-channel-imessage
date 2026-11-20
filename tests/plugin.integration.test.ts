@@ -4,7 +4,15 @@ import { describe, it } from 'node:test';
 
 import express, { type Router } from 'express';
 
-import type { ChannelKeyDirectory, PaceClock, SemanticAnswer } from '@omadia/channel-sdk';
+import type {
+  ChannelKeyDirectory,
+  ConversationMessageEvent,
+  ConversationSendProvider,
+  PaceClock,
+  QuestionCard,
+  SemanticAnswer,
+  TargetedSendProvider,
+} from '@omadia/channel-sdk';
 import type { PluginContext } from '@omadia/plugin-api';
 
 import { activate, type ActivationDeps } from '../src/plugin.js';
@@ -62,6 +70,9 @@ interface Harness {
 /** Next scripted answer(s) the fake orchestrator returns (FIFO, repeats last). */
 let scriptedAnswers: SemanticAnswer[] = [{ text: 'Antwort vom Agenten.' }];
 
+/** When set, Sendblue answers every send-message with this HTTP status. */
+let sendblueFailStatus: number | undefined;
+
 /** The registry does not declare the answer link for iMessage yet; this gate does. */
 const ADMIT_ALL: ActivationDeps['admitDecorations'] = (_channel, decorations) => ({
   admitted: decorations,
@@ -88,6 +99,9 @@ async function startHarness(
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes('sendblue')) {
+      if (url.endsWith('/api/send-message') && sendblueFailStatus !== undefined) {
+        return new Response('rejected', { status: sendblueFailStatus });
+      }
       if (url.endsWith('/api/send-message')) {
         sends.push({ url, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> });
       }
@@ -199,6 +213,7 @@ async function startHarness(
       server.close();
       globalThis.fetch = realFetch;
       scriptedAnswers = [{ text: 'Antwort vom Agenten.' }];
+      sendblueFailStatus = undefined;
     },
   };
 }
@@ -1083,6 +1098,316 @@ describe('plugin.activate — agents as colleagues (spec 2042)', () => {
       assert.equal(h.sends.length, 0, 'no acknowledgement under a name nobody resolved');
       release({ text: 'Fertig.', speaker: MIRA } as unknown as SemanticAnswer);
       await waitFor(() => h.sends.length === 1, 'the answer');
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('plugin.activate — send providers and plain-text cards (spec 2042 criterion 30)', () => {
+  interface Registered {
+    channelId: string;
+    provider: TargetedSendProvider | ConversationSendProvider;
+  }
+
+  async function startWithCore(config: Record<string, string> = {}) {
+    const targeted: Registered[] = [];
+    const conversation: Registered[] = [];
+    const events: ConversationMessageEvent[] = [];
+    const h = await startHarness({ ...config }, {}, {}, {
+      registerTargetedSendProvider: (channelId: string, provider: TargetedSendProvider) =>
+        targeted.push({ channelId, provider }),
+      registerConversationSendProvider: (channelId: string, provider: ConversationSendProvider) =>
+        conversation.push({ channelId, provider }),
+      emitConversationMessage: (event: ConversationMessageEvent) => events.push(event),
+    });
+    const dm = targeted[0]?.provider as TargetedSendProvider;
+    const conv = conversation[0]?.provider as ConversationSendProvider;
+    return { h, dm, conv, targeted, conversation, events };
+  }
+
+  const bubbles = (h: Harness): string[] => h.sends.map((s) => String(s.body.content));
+  const PRINCIPAL = `user:custom:${SENDER}`;
+
+  const CONSENT_CARD: QuestionCard = {
+    cardId: 'proposal-7',
+    proposalId: 'p-7',
+    proposalVersion: 2,
+    title: 'Termin Donnerstag 10:00',
+    questions: [{ id: 'q1', kind: 'consent', label: 'Passt das für dich?' }],
+  };
+
+  it('registers both providers under the channel id with the capabilities it implements', async () => {
+    const { h, targeted, conversation } = await startWithCore();
+    try {
+      assert.equal(targeted.length, 1);
+      assert.equal(conversation.length, 1);
+      assert.equal(targeted[0]?.channelId, 'imessage-channel');
+      const supports = (targeted[0]?.provider as TargetedSendProvider).supports;
+      assert.equal(supports?.poll, true);
+      assert.deepEqual(supports?.card?.maxQuestions, 1);
+      assert.equal(supports?.card?.update, false);
+      assert.ok(!supports?.card?.kinds.includes('assignment'), 'no roster, no assignment questions');
+      // One identity for every agent: the kernel must not send "as an agent".
+      assert.notEqual(supports?.asChannelKey, true);
+      assert.notEqual(supports?.mentions, true);
+      assert.notEqual(supports?.aiLabel, true);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('starts without the send seams on a host that predates them', async () => {
+    const h = await startHarness();
+    try {
+      assert.ok(h.logs.some((l) => l.includes('activated')));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('DMs a user by principal: plain text, one bubble, delivered with the conversation', async () => {
+    const { h, dm } = await startWithCore();
+    try {
+      const out = await dm.sendToUser({ principalId: PRINCIPAL }, { text: '**Erinnerung:** Bericht fällig.' });
+      assert.equal(out.outcome, 'delivered');
+      assert.deepEqual(bubbles(h), ['Erinnerung: Bericht fällig.']);
+      assert.equal(h.sends[0]?.body.number, SENDER);
+      assert.equal(out.outcome === 'delivered' ? out.conversationId : undefined, SENDER);
+      assert.equal(out.outcome === 'delivered' ? out.messageId : undefined, 'out-1');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('posts into a conversation addressed by the sender number', async () => {
+    const { h, conv } = await startWithCore();
+    try {
+      const out = await conv.sendToConversation(SENDER, { text: 'Kurzer Anstoß.' });
+      assert.equal(out.outcome, 'delivered');
+      assert.deepEqual(bubbles(h), ['Kurzer Anstoß.']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('attachments degrade to a link line (no outbound media)', async () => {
+    const { h, dm } = await startWithCore();
+    try {
+      await dm.sendToUser(
+        { principalId: PRINCIPAL },
+        { text: 'Bericht.', attachments: [{ kind: 'file', url: 'https://x.test/r.pdf', altText: 'Bericht.pdf' }] },
+      );
+      assert.deepEqual(bubbles(h), ['Bericht.\n\nBericht.pdf: https://x.test/r.pdf']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('returns unreachable, never throws: a principal that is not an iMessage number', async () => {
+    const { h, dm } = await startWithCore();
+    try {
+      for (const principalId of ['user:anna@example.com', 'user:teams-aad:abc', 'role:hr', 'user:custom:nope']) {
+        const out = await dm.sendToUser({ principalId }, { text: 'Hallo' });
+        assert.equal(out.outcome, 'unreachable', principalId);
+      }
+      assert.equal(h.sends.length, 0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('refuses a number outside the allowlist as not_permitted and sends nothing', async () => {
+    const { h, dm } = await startWithCore({ allowlist: '+491700000000' });
+    try {
+      const out = await dm.sendToUser({ principalId: PRINCIPAL }, { text: 'Hallo' });
+      assert.deepEqual(out, {
+        outcome: 'unreachable',
+        code: 'not_permitted',
+        message: "the number is not on this channel's allowlist",
+      });
+      assert.equal(h.sends.length, 0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('returns a provider failure as unreachable channel_error and opens no question', async () => {
+    const { h, dm, events } = await startWithCore();
+    try {
+      sendblueFailStatus = 400;
+      const out = await dm.sendToUser({ principalId: PRINCIPAL }, { text: '', card: CONSENT_CARD });
+      assert.equal(out.outcome, 'unreachable');
+      assert.equal(out.outcome === 'unreachable' ? out.code : undefined, 'channel_error');
+      sendblueFailStatus = undefined;
+      // The card never went out, so "Ja" is an ordinary message.
+      await postWebhook(h.base, SECRET, inbound({ content: 'Ja' }));
+      await waitFor(() => h.chatCalls.length === 1, 'ordinary turn');
+      assert.equal(events.length, 0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('posts a poll as numbered text and turns the typed number into a poll answer', async () => {
+    const { h, dm, events } = await startWithCore();
+    try {
+      const out = await dm.sendToUser(
+        { principalId: PRINCIPAL },
+        {
+          text: 'Wir stimmen kurz ab.',
+          poll: {
+            pollId: 'poll-1',
+            question: 'Wann treffen wir uns?',
+            options: [
+              { id: 'di', label: 'Di 10:00' },
+              { id: 'mi', label: 'Mi 14:30' },
+            ],
+          },
+        },
+      );
+      assert.equal(out.outcome, 'delivered');
+      assert.deepEqual(bubbles(h), [
+        'Wir stimmen kurz ab.',
+        'Wann treffen wir uns?\n\nAntworte mit der Nummer.\n1) Di 10:00\n2) Mi 14:30',
+      ]);
+      assert.equal(out.outcome === 'delivered' ? out.cardMessageId : undefined, 'out-1');
+
+      await postWebhook(h.base, SECRET, inbound({ content: '2' }));
+      await waitFor(() => events.length === 1, 'card answer event');
+      assert.equal(h.chatCalls.length, 0, 'the answer is not a turn: no agent runs');
+      assert.deepEqual(events[0], {
+        channelId: 'imessage-channel',
+        channelType: 'imessage',
+        conversationId: SENDER,
+        conversationType: 'direct',
+        receivedByChannelKey: LINE,
+        messageId: 'out-1',
+        revision: 0,
+        kind: 'card_answer',
+        author: { kind: 'custom', id: SENDER },
+        occurredAt: events[0]?.occurredAt,
+        cardAnswer: { cardId: 'poll-1', value: { optionId: 'mi' }, answererVerified: true },
+      });
+      // Answered once: the next message is an ordinary turn again.
+      await postWebhook(h.base, SECRET, inbound({ content: '1' }));
+      await waitFor(() => h.chatCalls.length === 1, 'ordinary turn');
+      assert.equal(events.length, 1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('posts a question card as text and answers it with typed values (consent, proposal id and version)', async () => {
+    const { h, conv, events } = await startWithCore();
+    try {
+      const out = await conv.sendToConversation(SENDER, { text: '', card: CONSENT_CARD });
+      assert.equal(out.outcome, 'delivered');
+      assert.deepEqual(bubbles(h), ['Termin Donnerstag 10:00\n\nPasst das für dich?\nJa oder Einwand']);
+
+      await postWebhook(h.base, SECRET, inbound({ content: 'Einwand: ich habe Urlaub' }));
+      await waitFor(() => events.length === 1, 'card answer event');
+      const answer = events[0]?.cardAnswer;
+      assert.equal(answer?.cardId, 'proposal-7');
+      assert.equal(answer?.proposalId, 'p-7');
+      assert.equal(answer?.proposalVersion, 2);
+      assert.deepEqual(answer?.answers, [
+        { questionId: 'q1', kind: 'consent', decision: 'object', reason: 'ich habe Urlaub' },
+      ]);
+      assert.deepEqual(answer?.value, { answers: answer?.answers });
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('asks again once when a reply does not fit, then lets the text through as an ordinary turn', async () => {
+    const { h, conv, events } = await startWithCore();
+    try {
+      await conv.sendToConversation(SENDER, {
+        text: '',
+        poll: {
+          pollId: 'p',
+          question: 'Welcher Tag?',
+          options: [
+            { id: 'a', label: 'Di' },
+            { id: 'b', label: 'Mi' },
+          ],
+        },
+      });
+      await postWebhook(h.base, SECRET, inbound({ content: '7' }));
+      await waitFor(() => h.sends.length === 2, 'asked again');
+      assert.match(bubbles(h)[1] ?? '', /^Das konnte ich nicht zuordnen\. Bitte antworte so:\n\nWelcher Tag\?/);
+      assert.equal(h.chatCalls.length, 0);
+      await postWebhook(h.base, SECRET, inbound({ content: 'Was ist heute los?' }));
+      await waitFor(() => h.chatCalls.length === 1, 'second miss goes to the agent');
+      assert.equal(events.length, 0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('a command never answers the open question: /agents reaches the resolver ChatAgent', async () => {
+    const { h, conv, events } = await startWithCore();
+    try {
+      await conv.sendToConversation(SENDER, { text: '', card: CONSENT_CARD });
+      await postWebhook(h.base, SECRET, inbound({ content: '/agents' }));
+      await waitFor(() => h.chatCalls.length === 1, 'command turn');
+      assert.equal(h.chatCalls[0]?.userMessage, '/agents');
+      assert.equal(events.length, 0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('refuses what a typed reply cannot carry: several questions, assignment, poll and card together', async () => {
+    const { h, conv } = await startWithCore();
+    try {
+      const two: QuestionCard = {
+        ...CONSENT_CARD,
+        questions: [
+          { id: 'q1', kind: 'consent', label: 'A?' },
+          { id: 'q2', kind: 'text', label: 'B?' },
+        ],
+      };
+      const assign: QuestionCard = {
+        ...CONSENT_CARD,
+        questions: [{ id: 'q1', kind: 'assignment', label: 'Wer?', candidates: 'conversation_members' }],
+      };
+      for (const message of [
+        { text: '', card: two },
+        { text: '', card: assign },
+        { text: '', card: CONSENT_CARD, poll: { pollId: 'p', question: 'Q?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] } },
+        { text: '', poll: { pollId: 'p', question: 'Q?', options: [{ id: 'a', label: 'A' }] } },
+      ]) {
+        const out = await conv.sendToConversation(SENDER, message);
+        assert.equal(out.outcome, 'unreachable');
+        assert.equal(out.outcome === 'unreachable' ? out.code : undefined, 'channel_error');
+      }
+      assert.equal(h.sends.length, 0, 'nothing half-posted');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('without the emitConversationMessage seam a reply stays an ordinary turn (the answer could not be delivered)', async () => {
+    const targeted: TargetedSendProvider[] = [];
+    const h = await startHarness({}, {}, {}, {
+      registerTargetedSendProvider: (_id: string, p: TargetedSendProvider) => targeted.push(p),
+    });
+    try {
+      await targeted[0]?.sendToUser({ principalId: PRINCIPAL }, { text: '', card: CONSENT_CARD });
+      await postWebhook(h.base, SECRET, inbound({ content: 'Ja' }));
+      await waitFor(() => h.chatCalls.length === 1, 'ordinary turn');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sendTyping is best-effort and posts no message', async () => {
+    const { h, conv } = await startWithCore();
+    try {
+      await conv.sendTyping?.(SENDER);
+      assert.equal(h.sends.length, 0);
     } finally {
       await h.close();
     }
