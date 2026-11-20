@@ -53,7 +53,10 @@ depends_on: []
 # Kernel capabilities consumed via ctx.services. The kernel's service gate
 # (omadia#838) rejects any ctx.services.get(<name>) whose name is not declared
 # here, so the list must mirror what plugin.ts actually resolves:
-#   chatAgent                — hard; the orchestrator the channel drives.
+#   chatAgent                — hard; ONLY the single orchestrator of a host without
+#                              a channel resolver. With a resolver (S1) every turn,
+#                              a refusal included, uses the resolve result's
+#                              ChatAgent; chatAgent@1 then refuses non-canvas turns.
 #   channelResolver          — optional; Agent-binding routing (line / sender).
 #   channelDirectoryRegistry — optional; lists the line in the operator
 #                              channels dashboard as a pickable binding key.

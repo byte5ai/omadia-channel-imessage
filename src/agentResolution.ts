@@ -1,8 +1,6 @@
 import {
-  CHANNEL_RESOLVER_SERVICE,
   channelUserPrincipal,
   type AgentSpeaker,
-  type ChannelBindingResolver,
   type ChannelResolveResult,
   type ChannelRouteContext,
   type ChatAgent,
@@ -20,8 +18,7 @@ import {
  * notice. The channel passes the text through and never parses those commands.
  */
 
-export { CHANNEL_RESOLVER_SERVICE };
-export type { ChannelBindingResolver, ChannelResolveResult, ChannelRouteContext };
+export type { ChannelResolveResult, ChannelRouteContext };
 
 /**
  * The agent answers. `speaker` is who the resolver named before the answer
@@ -54,8 +51,17 @@ export interface FailedRoute {
 export type TurnRoute = AgentRoute | RefusedRoute | FailedRoute;
 
 /**
- * Resolve a turn's agent. `channelKeys` are tried most specific first (the
- * sender's number, then the line). The first key that resolves `bound` decides.
+ * Looks one key up through the channel resolver. `undefined` means the host
+ * publishes NO resolver (`resolveChannelRoute` of the channel SDK).
+ */
+export type RouteLookup = (key: string, context: ChannelRouteContext) => ChannelResolveResult | undefined;
+
+/**
+ * Resolve a turn's agent. `channelKeys` are tried most specific first: the
+ * sender's number (the narrowest conversation key of an iMessage chat, where a
+ * selection and a binding live), then the line (a binding an operator set on
+ * the key the channel directory lists). The first key that resolves `bound`
+ * decides.
  *
  * A reject that names an agent (disabled, deleted, not available to the
  * sender; any notice but `no_agent`) ends the search: the addressed agent
@@ -64,22 +70,29 @@ export type TurnRoute = AgentRoute | RefusedRoute | FailedRoute;
  * lets the next key try. When no key binds, the FIRST reject is the answer:
  * the sender's key is where `/agent <name>` stores a selection.
  *
- * `defaultAgent` answers only when the resolver is NOT published, a
- * single-Agent host where it is the deployment's one orchestrator.
+ * `getDefaultAgent` is consulted ONLY when the host publishes no resolver
+ * (`lookup` answers `undefined`): a host without a multi-agent registry, where
+ * the singleton `chatAgent@1` is the deployment's one orchestrator. With a
+ * resolver the singleton is never used, not even after a refusal: since S1 it
+ * answers every non-canvas turn with the `no_agent` notice.
  */
 export function resolveAgentForTurn(
-  resolver: ChannelBindingResolver | undefined,
-  channelType: string,
+  lookup: RouteLookup,
   channelKeys: ReadonlyArray<string | null | undefined>,
-  defaultAgent: ChatAgent,
+  getDefaultAgent: () => ChatAgent | undefined,
   context: ChannelRouteContext = {},
 ): TurnRoute {
-  if (!resolver) return { kind: 'agent', agent: defaultAgent };
   let firstReject: ChannelResolveResult | undefined;
   try {
     for (const key of channelKeys) {
       if (!key) continue;
-      const result = resolver.resolve(channelType, key, context);
+      const result = lookup(key, context);
+      if (result === undefined) {
+        const agent = getDefaultAgent();
+        return agent
+          ? { kind: 'agent', agent }
+          : { kind: 'resolver-failed', error: 'no channel resolver and no orchestrator service available' };
+      }
       if (result.decision === 'bound' && result.chatAgent) {
         return {
           kind: 'agent',

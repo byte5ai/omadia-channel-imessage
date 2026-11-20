@@ -8,6 +8,7 @@ import {
   principalFor,
   resolveAgentForTurn,
   type ChannelResolveResult,
+  type RouteLookup,
   type TurnRoute,
 } from '../src/agentResolution.js';
 
@@ -15,12 +16,11 @@ const agent = (name: string) => ({ name }) as unknown as ChatAgent;
 const DEFAULT = agent('default');
 const MIRA: AgentSpeaker = { kind: 'agent', agentId: 'ag-mira', slug: 'mira', displayName: 'Mira' };
 
-const resolverOf = (byKey: Record<string, ChannelResolveResult>, probes: string[] = []) => ({
-  resolve: (_t: string, key: string) => {
+const resolverOf = (byKey: Record<string, ChannelResolveResult>, probes: string[] = []): RouteLookup =>
+  (key) => {
     probes.push(key);
     return byKey[key] ?? { decision: 'reject' as const };
-  },
-});
+  };
 
 const nameOf = (a: ChatAgent | undefined) => (a as unknown as { name: string } | undefined)?.name;
 const pick = (r: TurnRoute) => (r.kind === 'agent' ? nameOf(r.agent) : r);
@@ -33,9 +33,8 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
         { S: { decision: 'bound', chatAgent: agent('S') }, L: { decision: 'bound', chatAgent: agent('L') } },
         probes,
       ),
-      'imessage',
       ['S', 'L'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.equal(pick(r), 'S');
     assert.deepEqual(probes, ['S']);
@@ -44,9 +43,8 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
   it('hands on the speaker the resolver named before the answer', () => {
     const r = resolveAgentForTurn(
       resolverOf({ S: { decision: 'bound', chatAgent: agent('S'), speaker: MIRA } }),
-      'imessage',
       ['S'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.deepEqual(r.kind === 'agent' ? r.speaker : undefined, MIRA);
   });
@@ -54,9 +52,8 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
   it('a reject without an agent named lets the line key try', () => {
     const r = resolveAgentForTurn(
       resolverOf({ L: { decision: 'bound', chatAgent: agent('L') } }),
-      'imessage',
       ['S', 'L'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.equal(pick(r), 'L');
   });
@@ -65,9 +62,8 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
     const notice = { code: 'no_agent', text: 'Schreib /agent Name.', locale: 'de' } as const;
     const r = resolveAgentForTurn(
       resolverOf({ S: { decision: 'reject', notice }, L: { decision: 'bound', chatAgent: agent('L') } }),
-      'imessage',
       ['S', 'L'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.equal(pick(r), 'L');
   });
@@ -79,9 +75,8 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
         S: { decision: 'reject', notice, chatAgent: agent('S-reject') },
         L: { decision: 'bound', chatAgent: agent('L') },
       }),
-      'imessage',
       ['S', 'L'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.equal(r.kind, 'refused');
     if (r.kind !== 'refused') return;
@@ -97,9 +92,8 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
         S: { decision: 'reject', notice, chatAgent: agent('S-reject') },
         L: { decision: 'reject', chatAgent: agent('L-reject') },
       }),
-      'imessage',
       ['S', 'L'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.equal(r.kind, 'refused');
     if (r.kind !== 'refused') return;
@@ -109,21 +103,33 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
   });
 
   it('a bare reject (an older platform) is refused without an agent or notice', () => {
-    const r = resolveAgentForTurn(resolverOf({}), 'imessage', ['S', 'L'], DEFAULT);
+    const r = resolveAgentForTurn(resolverOf({}), ['S', 'L'], () => DEFAULT);
     assert.deepEqual(r, { kind: 'refused', reason: 'unassigned' });
   });
 
-  it('answers with the default agent only without a resolver', () => {
-    assert.equal(pick(resolveAgentForTurn(undefined, 'imessage', ['S'], DEFAULT)), 'default');
+  it('answers with the singleton only on a host without a resolver (lookup is undefined)', () => {
+    assert.equal(pick(resolveAgentForTurn(() => undefined, ['S'], () => DEFAULT)), 'default');
+  });
+
+  it('never asks for the singleton while a resolver exists, not even after a refusal', () => {
+    let asked = 0;
+    const getDefault = () => (asked += 1, DEFAULT);
+    resolveAgentForTurn(resolverOf({}), ['S', 'L'], getDefault);
+    resolveAgentForTurn(resolverOf({ S: { decision: 'bound', chatAgent: agent('S') } }), ['S', 'L'], getDefault);
+    assert.equal(asked, 0);
+  });
+
+  it('a host with neither resolver nor orchestrator is a failure, not a silent drop', () => {
+    const r = resolveAgentForTurn(() => undefined, ['S'], () => undefined);
+    assert.equal(r.kind, 'resolver-failed');
   });
 
   it('passes the route context (principal) to every probe', () => {
     const seen: unknown[] = [];
     resolveAgentForTurn(
-      { resolve: (_t, _k, context) => (seen.push(context), { decision: 'reject' as const }) },
-      'imessage',
+      (_k, context) => (seen.push(context), { decision: 'reject' as const }),
       ['S', 'L'],
-      DEFAULT,
+      () => DEFAULT,
       { principal: 'user:custom:+49170' },
     );
     assert.deepEqual(seen, [{ principal: 'user:custom:+49170' }, { principal: 'user:custom:+49170' }]);
@@ -131,14 +137,11 @@ describe('resolveAgentForTurn — bound or reject, never a fallback', () => {
 
   it('refuses when the resolver throws', () => {
     const r = resolveAgentForTurn(
-      {
-        resolve: () => {
-          throw new Error('boom');
-        },
+      () => {
+        throw new Error('boom');
       },
-      'imessage',
       ['S'],
-      DEFAULT,
+      () => DEFAULT,
     );
     assert.deepEqual(r, { kind: 'resolver-failed', error: 'boom' });
   });

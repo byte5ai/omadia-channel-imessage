@@ -290,11 +290,30 @@ noch der Line-Key versucht). Bei einem Reject läuft kein Agent; es geht nur ein
 `system`-Nachricht raus, nie Worte eines Agenten. Auf einem Host ohne
 Multi-Agent-Registry beantwortet dessen einziger Orchestrator jede Unterhaltung.
 
-Weil der Key des Absenders zuerst gefragt wird und ein `bound` endgültig ist,
-verdeckt ein Default-Agent-Eintrag, der für den Absender-Key einen Agenten nennt,
-ein Binding, das nur auf der Line sitzt. Die Line nur binden, wenn die
-Default-Tabelle für diesen Channel `off` ist, oder die Absender-Nummern binden
-(siehe offene Fragen im PR).
+**Auswahlschlüssel.** omadia hängt eine Agentenauswahl an den engsten
+Gesprächsschlüssel des Turns (der `channelKey` des Resolve-Aufrufs) plus den
+Principal des Absenders. In einem iMessage-Chat ist das die **Absender-Nummer**:
+sie ist das Gespräch und wird als Erstes übergeben, die `/agent`-Auswahl eines
+Nutzers und ein Binding auf eine Absender-Nummer liegen also dort. Die **Line**
+ist der zweite Key, weil das Channel-Verzeichnis sie als Binding-Key listet.
+Rangfolge:
+
+1. der Absender-Key: Auswahl, dann Binding, dann Default-Agent-Tabelle (von
+   omadia je Key angewandt); ein `bound` hier ist endgültig;
+2. der Line-Key, nur wenn der Absender-Key ohne Agentennennung abgelehnt hat.
+
+Folge: Ein Default-Agent-Eintrag, der für den Absender-Key einen Agenten nennt,
+verdeckt ein Binding, das nur auf der Line sitzt. Die Line nur binden, wenn die
+Default-Tabelle für diesen Channel `off` ist, oder die Absender-Nummern binden.
+Ein `/agent`, das getippt wird, während nur die Line bindet, wird unter dem
+Line-Key gespeichert.
+
+Das Plugin fällt nie auf den einzelnen `chatAgent@1`-Orchestrator zurück, solange
+ein Resolver veröffentlicht ist, auch nicht nach einer Ablehnung: Jeder Turn
+nutzt den ChatAgent des Resolve-Ergebnisses. Nur ein Host ohne Resolver (keine
+Multi-Agent-Registry) nutzt den Singleton. Es wird keine Sprache an den Resolver
+übergeben: Sendblue meldet die Sprache der Person nicht, omadias Notices kommen
+daher in seinem Standard.
 
 ## Umfragen und Fragekarten (Klartext)
 

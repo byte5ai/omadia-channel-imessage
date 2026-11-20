@@ -233,10 +233,27 @@ line key is still tried before). On a reject no agent runs; only a `system`
 message goes out, never an agent's words. On a host without the multi-Agent
 registry, its single orchestrator answers every conversation.
 
-Because the sender's key is asked first and a `bound` answer is final, a
-default-agent entry that names an agent for the sender key hides a binding that
-is set on the line only. Bind the line only when the default table is `off` for
-this channel, or bind the sender numbers (see the open questions of the PR).
+**Selection key.** omadia ties an agent selection to the narrowest conversation
+key of the turn (the `channelKey` of the resolve call) plus the sender's
+principal. In an iMessage chat that key is the **sender's number**: it is the
+conversation, and it is what the plugin passes first, so a user's `/agent`
+selection and a binding on a sender number both live there. The **line** is the
+second key, kept because the channel directory lists it as a binding key. Rank:
+
+1. the sender key: selection, then binding, then the default-agent table
+   (applied by omadia within the key); a `bound` answer here is final;
+2. the line key, only when the sender key rejected without naming an agent.
+
+Consequence: a default-agent entry that names an agent for the sender key hides
+a binding set on the line only. Bind the line only when the default table is
+`off` for this channel, or bind the sender numbers. A `/agent` typed while only
+the line binds is stored under the line key.
+
+The plugin never falls back to the single `chatAgent@1` orchestrator while a
+resolver is published, a refusal included: every turn uses the ChatAgent of the
+resolve result. Only a host without a resolver (no multi-agent registry) uses the
+singleton. No locale is passed to the resolver: Sendblue does not report the
+person's language, so omadia's notices come in its default.
 
 ## Polls and question cards (plain text)
 

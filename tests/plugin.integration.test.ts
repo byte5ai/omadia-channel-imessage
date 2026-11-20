@@ -629,6 +629,65 @@ describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
     }
   });
 
+  it('rank: a bound answer on the sender key is final, the line binding is not asked (selection key = narrowest key)', async () => {
+    const senderCalls: string[] = [];
+    const lineCalls: string[] = [];
+    const { probes, harness } = await runWithResolver((_t, key) =>
+      key === SENDER
+        ? { decision: 'bound', chatAgent: recordingAgent(senderCalls, 'sender-or-default-agent') }
+        : { decision: 'bound', chatAgent: recordingAgent(lineCalls, 'line-agent') },
+    );
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => senderCalls.length === 1, 'sender-key agent answered');
+      assert.deepEqual(probes.map((p) => p.channelKey), [SENDER]);
+      assert.deepEqual(lineCalls, [], 'a line binding never beats the sender key');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('never falls back to the chatAgent@1 singleton while a resolver is published, refusals included', async () => {
+    const { harness } = await runWithResolver(() => ({ decision: 'reject' }));
+    try {
+      await postWebhook(harness.base, SECRET, inbound());
+      await waitFor(() => harness.sends.length === 1, 'refusal notice sent');
+      assert.equal(harness.chatCalls.length, 0, 'the singleton must not run');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('activates without chatAgent@1 when a resolver answers every turn', async () => {
+    const bound: string[] = [];
+    const h = await startHarness(
+      {},
+      {
+        chatAgent: undefined,
+        channelResolver: {
+          resolve: () => ({ decision: 'bound', chatAgent: recordingAgent(bound, 'resolved') }),
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => bound.length === 1, 'resolved agent answered');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('without a resolver and without chatAgent@1 the sender gets the failure notice', async () => {
+    const h = await startHarness({}, { chatAgent: undefined });
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'failure notice');
+      assert.match(String(h.sends[0]?.body.content), /Fehler aufgetreten/);
+    } finally {
+      await h.close();
+    }
+  });
+
   /** What the operator sees on the admin page. */
   async function channelStatus(h: Harness): Promise<{ status: string; lastError: string | null }> {
     const res = await fetch(`${h.adminBase}/api/status`);
@@ -762,6 +821,9 @@ describe('plugin.activate — agents as colleagues (spec 2042)', () => {
       await postWebhook(h.base, SECRET, inbound());
       await waitFor(() => h.sends.length === 1, 'answer');
       assert.deepEqual(contexts, [{ principal: `user:custom:${SENDER}` }]);
+      // Sendblue does not tell the person's language: no locale is passed, the
+      // kernel's notices come in its default instead of in a guessed one.
+      assert.ok(!('locale' in (contexts[0] as object)), 'locale is omitted unless the channel knows it');
     } finally {
       await h.close();
     }

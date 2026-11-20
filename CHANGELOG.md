@@ -59,6 +59,13 @@ kernel runs on the target instance.**
   typed `card_answer` conversation messages (`emitConversationMessage`). Declared:
   `poll`, `card` (7 kinds, 1 question, no update). Not declared: `asChannelKey`,
   `mentions`, `aiLabel`. Numbers outside the allowlist are `not_permitted`.
+- **No singleton fallback.** With a resolver published every turn, a refusal
+  included, uses the ChatAgent of the resolve result (`resolveChannelRoute`);
+  `chatAgent@1` (a refuser since S1) is looked up per turn and only on a host
+  without a resolver. Activation no longer fails when it is absent.
+- **Selection key** is the sender number (narrowest conversation key), the line
+  second; rank and its consequence are documented in the README. No locale is
+  passed (Sendblue does not report one).
 - **compat.core** is the placeholder `>=1.74.0 <2.0` (the parent session sets the
   final floor and the version when the kernel lands).
 - README (EN, DE): per-agent identity is **not supported** (one Sendblue line

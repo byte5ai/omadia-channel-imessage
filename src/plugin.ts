@@ -3,12 +3,13 @@ import { fileURLToPath } from 'node:url';
 
 import { Router } from 'express';
 
-import * as channelSdk from '@omadia/channel-sdk';
 import {
   DEFAULT_PACE_PROFILE,
   InMemorySpeakerHistoryStore,
+  getChatAgent,
   isNoReply,
   logNoReplyDrop,
+  resolveChannelRoute,
   runPacedTurn,
   type ChatAgent,
   type ChannelHandle,
@@ -21,10 +22,8 @@ import type { PluginContext } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
 import {
-  CHANNEL_RESOLVER_SERVICE,
   principalFor,
   resolveAgentForTurn,
-  type ChannelBindingResolver,
   type RefusedRoute,
 } from './agentResolution.js';
 import { AnswerStore } from './answerStore.js';
@@ -106,19 +105,6 @@ export async function activate(
   const links: AnswerLinkContext | null =
     publicBaseUrl.length > 0 ? { store: answerStore, publicBaseUrl } : null;
 
-  // Resolve the orchestrator's ChatAgent. Prefers the SDK's getChatAgent()
-  // helper; falls back to the raw 'chatAgent' service lookup so the plugin
-  // still runs on a host whose channel-sdk predates the helper.
-  const maybeAgent = resolveChatAgent(ctx);
-  if (!maybeAgent) {
-    throw new Error(
-      '@omadia/channel-imessage: orchestrator unavailable (getChatAgent) — the orchestrator plugin must be installed and active',
-    );
-  }
-  // Re-bind under a non-optional type: the narrowing above does not survive
-  // into the hoisted `handleInbound` closure below.
-  const agent: ChatAgent = maybeAgent;
-
   const client = new SendblueClient({
     apiBaseUrl,
     apiV2BaseUrl,
@@ -139,7 +125,6 @@ export async function activate(
   // to the agent as typed).
   const runtime: TurnRuntime = {
     ctx,
-    defaultAgent: agent,
     core,
     client,
     state,
@@ -344,8 +329,6 @@ export interface ActivationDeps {
 /** Everything a turn needs besides the turn itself. */
 interface TurnRuntime {
   ctx: PluginContext;
-  /** Answers only on a host that publishes no channel resolver. */
-  defaultAgent: ChatAgent;
   core: CoreApi;
   client: SendblueClient;
   state: ChannelState;
@@ -412,11 +395,12 @@ async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
   // (`/agent <Name>`) ahead of a binding. Without a published resolver the
   // default agent answers.
   const principal = principalFor(turn.userRef.id);
+  // No locale: Sendblue does not tell the person's language, so the kernel's
+  // notices come in its default (German) rather than in a guessed one.
   const route = resolveAgentForTurn(
-    ctx.services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE),
-    CHANNEL_TYPE,
+    (key, context) => resolveChannelRoute(ctx, CHANNEL_TYPE, key, context),
     [turn.conversationId, state.me?.fromNumber],
-    rt.defaultAgent,
+    () => resolveSingletonAgent(ctx),
     principal ? { principal } : {},
   );
   if (route.kind === 'resolver-failed') {
@@ -595,18 +579,13 @@ async function refuseTurn(rt: TurnRuntime, turn: IncomingTurn, route: RefusedRou
 }
 
 /**
- * Resolve the orchestrator's {@link ChatAgent}. Prefers the SDK helper
- * `getChatAgent(ctx)` (the blessed, typed path); falls back to the raw
- * service-registry lookup so the plugin also runs on a host whose
- * `@omadia/channel-sdk` predates the helper (the `chatAgent` service itself
- * has always been there). Accessed via the namespace so a missing export is
- * just `undefined` at runtime rather than a module-load error.
+ * The deployment's singleton orchestrator, for a host that publishes NO channel
+ * resolver (no multi-agent registry). Looked up per turn and only then: with a
+ * resolver every turn, a refusal included, uses the ChatAgent of the resolve
+ * result, because since S1 the singleton refuses every non-canvas turn.
  */
-function resolveChatAgent(ctx: PluginContext): ChatAgent | undefined {
-  const helper = (channelSdk as { getChatAgent?: (c: PluginContext) => ChatAgent | undefined })
-    .getChatAgent;
-  if (helper) return helper(ctx);
-  return ctx.services.get<{ agent: ChatAgent }>('chatAgent')?.agent;
+function resolveSingletonAgent(ctx: PluginContext): ChatAgent | undefined {
+  return getChatAgent(ctx);
 }
 
 /** Parse the comma-separated allowlist into digits-only phone numbers. */
