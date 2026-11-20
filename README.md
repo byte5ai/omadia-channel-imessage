@@ -255,38 +255,27 @@ resolve result. Only a host without a resolver (no multi-agent registry) uses th
 singleton. No locale is passed to the resolver: Sendblue does not report the
 person's language, so omadia's notices come in its default.
 
-## Polls and question cards (plain text)
+## Proactive messages, polls and question cards
 
-A facilitation or a Conductor step can post a poll or a question card into an
-iMessage conversation (the channel registers TargetedSend and ConversationSend
-providers). iMessage cannot render a card, so it goes out as text and is
-answered in text:
+A facilitation or a Conductor step can post into an iMessage conversation: the
+channel registers TargetedSend and ConversationSend providers that deliver plain
+text (attachments go out as link lines, there is no outbound media; a principal is
+addressed as `user:custom:<number>`; numbers outside the `allowlist` are refused
+as not permitted). They declare **no** poll, card, "as an agent's own identity"
+(all agents share the Sendblue line, so omadia refuses such a send), mention or AI
+label capability.
 
-```
-Wann treffen wir uns?
-
-Antworte mit der Nummer.
-1) Di 10:00
-2) Mi 14:30
-```
-
-A reply is parsed deterministically (no model) into the typed answer a card
-click would carry and handed to omadia as a `card_answer` message (a poll as
-`{ optionId }`, a card with its typed `answers`, `proposalId` and
-`proposalVersion`). A reply that does not fit is asked again once; a second miss
-releases the question and the text goes on as an ordinary message. A message that
-starts with `/` (`/agent`, `/agents`) never answers a question. An answer is
-final (a posted bubble cannot be updated); an unanswered question expires with
-its `closesAt`, else after 24 hours; a restart forgets it.
-
-What the providers declare: polls, and question cards with **one** question of
-kind single choice, multiple choice, ranking, consent, text, number or date (a
-typed reply cannot say which of several questions it answers, and an assignment
-needs a member roster). They do **not** declare sending "as an agent's own
-identity" (all agents share the Sendblue line, so omadia refuses such a send),
-mentions or an AI label. A principal is addressed as `user:custom:<number>`;
-numbers outside the `allowlist` are refused as not permitted. Attachments go out
-as link lines (no outbound media).
+A poll or question card needs no code in this plugin. iMessage cannot render a
+card, so omadia itself posts it as numbered text through the conversation send,
+remembers the open question and turns a fitting typed reply (`2`, `1,3`, `Ja`,
+...) into the typed `card_answer`, deterministically and without a model. For that
+it has to see the reply, so the plugin reports every accepted inbound message as a
+`created` conversation message: direct, `addressedToBot: true` (every iMessage is a
+direct message to the line), author the number Sendblue states. Sendblue reports no
+reply-to message id, so `replyToMessageId` is never set; with one open question in
+the conversation the addressed reply is enough. Where omadia reads every message of
+a conversation itself (`conversationDelivery` is `all`) the event is the only path
+and no turn is started; otherwise the reply still reaches the agent as typed.
 
 ## Privacy & data transit
 

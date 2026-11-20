@@ -32,11 +32,10 @@ import {
   buildIMessageKeyDirectory,
   type ChannelDirectoryRegistryShim,
 } from './channelKeyDirectory.js';
-import { matchCardReply } from './cardReply.js';
+import { createdEventFor } from './conversationEvents.js';
 import { PendingChoices } from './choiceReply.js';
 import { agentAnswer, emitAnswer, stampSpeaker, systemAnswer } from './emit.js';
-import { createLruSet, evaluateInbound, normalizePhone } from './inbound.js';
-import { OpenCards } from './openCards.js';
+import { createLruSet, evaluateInbound, normalizePhone, type SendbluePayload } from './inbound.js';
 import { isAnswerLinkAdmitted, type DecorationGate } from './renderer.js';
 import { SendblueClient } from './sendblueClient.js';
 import { createConversationSendProvider, createTargetedSendProvider } from './sendProviders.js';
@@ -131,7 +130,6 @@ export async function activate(
     links,
     speakerHistory: new InMemorySpeakerHistoryStore(),
     pending: new PendingChoices(),
-    openCards: new OpenCards(),
     ...(deps.admitDecorations ? { admit: deps.admitDecorations } : {}),
     ...(deps.paceClock ? { paceClock: deps.paceClock } : {}),
   };
@@ -237,12 +235,12 @@ export async function activate(
     );
   }
 
-  // Proactive sends (Facilitator nudges, polls, question cards, Conductor
-  // reports). Feature-detected: a host that predates the seams simply has no
-  // way to ask this channel to post. The kernel drops the registrations when
-  // the channel deactivates. Both providers share the open-question store the
-  // inbound path matches replies against.
-  const sendDeps = { client, allowlist, openCards: runtime.openCards };
+  // Proactive sends (Facilitator nudges, Conductor reports) as plain text.
+  // Feature-detected: a host that predates the seams simply has no way to ask
+  // this channel to post. The kernel drops the registrations when the channel
+  // deactivates. Polls and question cards need nothing here: the kernel posts
+  // them as numbered text and reads the typed reply from the events below.
+  const sendDeps = { client, allowlist };
   if (typeof core.registerTargetedSendProvider === 'function') {
     core.registerTargetedSendProvider(channelId, createTargetedSendProvider(sendDeps));
   }
@@ -280,8 +278,10 @@ export async function activate(
     // A plain-text reply resolves any pending answer link of the conversation
     // — the user answered in iMessage, so a later link tap must 409.
     answerStore.resolveOpenForConversation(result.turn.conversationId, 'text');
-    // A reply to an open poll / question card is an answer, not a turn.
-    if (await answerOpenCard(runtime, result.turn)) return;
+    // The kernel reads a typed reply to a card or poll it posted as text from
+    // this event. Where it reads EVERY message of the conversation itself (a
+    // facilitation in `all` mode) the event is the only path: no turn.
+    if (reportInbound(runtime, body, result.turn)) return;
     // A bare number answers the numbered question the conversation was asked.
     const text = runtime.pending.resolve(result.turn.conversationId, result.turn.text);
     await handleTurn(runtime, text === result.turn.text ? result.turn : { ...result.turn, text });
@@ -299,7 +299,6 @@ export async function activate(
       seen.clear();
       answerStore.clear();
       runtime.pending.clear();
-      runtime.openCards.clear();
     },
   };
 }
@@ -335,8 +334,6 @@ interface TurnRuntime {
   links: AnswerLinkContext | null;
   speakerHistory: InMemorySpeakerHistoryStore;
   pending: PendingChoices;
-  /** The poll / question card each conversation was last asked (criterion 30). */
-  openCards: OpenCards;
   admit?: DecorationGate;
   paceClock?: PaceClock;
 }
@@ -352,38 +349,35 @@ function chatInput(turn: IncomingTurn): Parameters<ChatAgent['chat']>[0] {
 }
 
 /**
- * Match a message against the poll / question card the conversation was last
- * asked (spec 2042 criterion 30). `true` when the message was consumed: it
- * answered the question (forwarded as a typed `card_answer`) or did not fit and
- * the question was asked again. Without the kernel's `emitConversationMessage`
- * seam an answer cannot be delivered, so the message stays an ordinary turn.
+ * Report an accepted inbound message to the kernel as a `created` conversation
+ * message (fire-and-forget; a failing report never fails the turn). `true` when
+ * the kernel reads every message of this conversation itself
+ * (`conversationDelivery` is `all`): then the event is the only path and the
+ * channel starts no turn. Without the kernel seams nothing is reported and the
+ * turn runs.
  */
-async function answerOpenCard(rt: TurnRuntime, turn: IncomingTurn): Promise<boolean> {
-  const { core, client } = rt;
+function reportInbound(rt: TurnRuntime, body: unknown, turn: IncomingTurn): boolean {
+  const { core } = rt;
   if (typeof core.emitConversationMessage !== 'function') return false;
-  const outcome = matchCardReply(rt.openCards, turn.conversationId, turn.text, {
-    channelId: turn.channelId,
-    channelType: CHANNEL_TYPE,
-    line: rt.state.me?.fromNumber ?? '',
-    now: Date.now(),
-  });
-  if (outcome.kind === 'none') return false;
-  if (outcome.kind === 'answered') {
-    core.emitConversationMessage(outcome.event);
-    return true;
-  }
+  const line = rt.state.me?.fromNumber ?? '';
   try {
-    await emitAnswer(client, turn.conversationId, systemAnswer(outcome.text), {
-      conversationKey: turn.conversationId,
-      speakerHistory: rt.speakerHistory,
-    });
+    core.emitConversationMessage(
+      createdEventFor(body as SendbluePayload, {
+        channelId: turn.channelId,
+        channelType: CHANNEL_TYPE,
+        line,
+        conversationId: turn.conversationId,
+        text: turn.text,
+        now: Date.now(),
+      }),
+    );
+    return core.conversationDelivery?.(CHANNEL_TYPE, turn.conversationId, line) === 'all';
   } catch (err) {
-    core.log('error', 'failed to ask the iMessage question again', {
-      error: (err as Error).message,
-      conversationId: turn.conversationId,
+    core.log('warn', 'iMessage conversation message report failed (ignored)', {
+      error: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
-  return true;
 }
 
 /** Drive one orchestrator turn and ship the rendered answer back via Sendblue. */

@@ -53,12 +53,15 @@ kernel runs on the target instance.**
   neither it is **withheld** and the sender gets a `system` notice (fail-closed;
   the old "warn and send anyway" is gone). Without a resolver no speaker is known
   beforehand and no acknowledgement is sent.
-- **Send providers (criterion 30).** `TargetedSend` and `ConversationSend`
-  providers: text, polls and single-question cards as numbered text
-  (`renderCardAsText`), replies parsed with `parseCardReply` and forwarded as
-  typed `card_answer` conversation messages (`emitConversationMessage`). Declared:
-  `poll`, `card` (7 kinds, 1 question, no update). Not declared: `asChannelKey`,
-  `mentions`, `aiLabel`. Numbers outside the allowlist are `not_permitted`.
+- **Send providers, polls and cards as text (criterion 30).** `TargetedSend` and
+  `ConversationSend` providers deliver plain text and declare nothing else (no
+  `poll`, `card`, `asChannelKey`, `mentions`, `aiLabel`). Polls and question cards
+  need no plugin code: the kernel posts them as numbered text and turns a typed
+  reply into the `card_answer` (omadia c510bf5c4). The plugin reports every
+  accepted inbound message as a `created` conversation message (direct,
+  `addressedToBot: true`, no `replyToMessageId`: Sendblue reports none) and starts
+  no turn where the kernel reads every message (`conversationDelivery` `all`).
+  Numbers outside the allowlist are `not_permitted`.
 - **No singleton fallback.** With a resolver published every turn, a refusal
   included, uses the ChatAgent of the resolve result (`resolveChannelRoute`);
   `chatAgent@1` (a refuser since S1) is looked up per turn and only on a host

@@ -315,40 +315,30 @@ Multi-Agent-Registry) nutzt den Singleton. Es wird keine Sprache an den Resolver
 übergeben: Sendblue meldet die Sprache der Person nicht, omadias Notices kommen
 daher in seinem Standard.
 
-## Umfragen und Fragekarten (Klartext)
+## Proaktive Nachrichten, Umfragen und Fragekarten
 
-Eine Moderation oder ein Conductor-Schritt kann eine Umfrage oder eine Fragekarte
-in eine iMessage-Unterhaltung posten (der Channel registriert TargetedSend- und
-ConversationSend-Provider). iMessage kann keine Karte darstellen, sie geht daher
-als Text raus und wird als Text beantwortet:
+Eine Moderation oder ein Conductor-Schritt kann in eine iMessage-Unterhaltung
+posten: Der Channel registriert TargetedSend- und ConversationSend-Provider, die
+Klartext liefern (Anhänge gehen als Linkzeilen raus, es gibt keine ausgehenden
+Medien; ein Principal wird als `user:custom:<Nummer>` angesprochen; Nummern
+außerhalb der `allowlist` werden als nicht erlaubt abgelehnt). Sie deklarieren
+**keine** Umfragen, Karten, das Senden „als eigene Identität eines Agenten“ (alle
+Agenten teilen die Sendblue-Line, omadia lehnt so ein Senden ab), Erwähnungen und
+kein KI-Label.
 
-```
-Wann treffen wir uns?
-
-Antworte mit der Nummer.
-1) Di 10:00
-2) Mi 14:30
-```
-
-Eine Antwort wird deterministisch geparst (kein Modell) und als die typisierte
-Antwort, die ein Klick auf die Karte trüge, als `card_answer`-Nachricht an omadia
-übergeben (eine Umfrage als `{ optionId }`, eine Karte mit ihren typisierten
-`answers`, `proposalId` und `proposalVersion`). Passt eine Antwort nicht, wird
-einmal nachgefragt; der zweite Fehlgriff gibt die Frage frei, und der Text läuft
-als gewöhnliche Nachricht weiter. Eine Nachricht, die mit `/` beginnt (`/agent`,
-`/agents`), beantwortet nie eine Frage. Eine Antwort gilt endgültig (eine
-gesendete Blase lässt sich nicht aktualisieren); eine unbeantwortete Frage
-verfällt mit ihrem `closesAt`, sonst nach 24 Stunden; ein Neustart vergisst sie.
-
-Was die Provider deklarieren: Umfragen und Fragekarten mit **einer** Frage der
-Art Einzelauswahl, Mehrfachauswahl, Rangfolge, Zustimmung, Text, Zahl oder Datum
-(eine getippte Antwort kann bei mehreren Fragen nicht sagen, welche sie
-beantwortet; eine Zuweisung braucht ein Mitglieder-Roster). Sie deklarieren
-**nicht** das Senden „als eigene Identität eines Agenten“ (alle Agenten teilen
-die Sendblue-Line, omadia lehnt so ein Senden ab), Erwähnungen und ein KI-Label.
-Ein Principal wird als `user:custom:<Nummer>` angesprochen; Nummern außerhalb der
-`allowlist` werden als nicht erlaubt abgelehnt. Anhänge gehen als Linkzeilen raus
-(keine ausgehenden Medien).
+Eine Umfrage oder Fragekarte braucht in diesem Plugin keinen Code. iMessage kann
+keine Karte darstellen, also postet omadia sie selbst als nummerierten Text über
+den Conversation-Send, merkt sich die offene Frage und macht aus einer passenden
+getippten Antwort (`2`, `1,3`, `Ja`, ...) das typisierte `card_answer`,
+deterministisch und ohne Modell. Dafür muss omadia die Antwort sehen: Das Plugin
+meldet jede angenommene eingehende Nachricht als `created`-Konversationsnachricht
+(direkt, `addressedToBot: true`, weil jede iMessage eine Direktnachricht an die
+Line ist, Autor ist die von Sendblue genannte Nummer). Sendblue liefert keine
+Reply-to-Nachrichten-ID, `replyToMessageId` wird also nie gesetzt; bei genau einer
+offenen Frage in der Unterhaltung reicht die adressierte Antwort. Liest omadia
+alle Nachrichten einer Unterhaltung selbst (`conversationDelivery` ist `all`), ist
+das Event der einzige Weg und es startet kein Turn; sonst erreicht die Antwort den
+Agenten weiter wie getippt.
 
 ## Datenschutz & Datentransit
 
