@@ -74,7 +74,7 @@ kernel runs on the target instance.**
 - **Selection key** is the sender number (narrowest conversation key), the line
   second; rank and its consequence are documented in the README. No locale is
   passed (Sendblue does not report one).
-- **compat.core** is the placeholder `>=1.74.0 <2.0` (the parent session sets the
+- **compat.core** is the placeholder `>=1.76.0 <2.0` (the parent session sets the
   final floor and the version when the kernel lands).
 - README (EN, DE): per-agent identity is **not supported** (one Sendblue line
   per installation; what multiple lines would take and why it is not built),

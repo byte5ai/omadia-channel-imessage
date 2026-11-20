@@ -33,7 +33,7 @@ identity:
     - "communication"
 
 # compat.core is checked against the host's @omadia/plugin-api version. The
-# floor is a PLACEHOLDER (>=1.74.0) for the first release that carries the
+# floor is a PLACEHOLDER (>=1.76.0) for the first release that carries the
 # agents-as-colleagues contract (byte5ai/omadia#2042): the channel resolver
 # answers `bound` or `reject` (never a fallback) with the agent's speaker
 # before the answer, `/agent` is carried out by the resolver's ChatAgent, and
@@ -44,7 +44,7 @@ identity:
 # final floor when the kernel lands; refusing the install on an older host is
 # the honest failure.
 compat:
-  core: ">=1.74.0 <2.0"
+  core: ">=1.76.0 <2.0"
   node: ">=20"
 
 depends_on: []
