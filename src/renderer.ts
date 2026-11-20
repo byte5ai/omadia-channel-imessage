@@ -1,28 +1,60 @@
-import type {
-  FollowUpOption,
-  OutgoingAttachment,
-  OutgoingChoiceCard,
-  SemanticAnswer,
+import {
+  InMemorySpeakerHistoryStore,
+  admitDecorations,
+  renderPlainAnswer,
+  type OutgoingAttachment,
+  type OutgoingInteractive,
+  type SemanticAnswer,
+  type SpeakerHistoryStore,
 } from '@omadia/channel-sdk';
 
+/** The channel type the decoration registry knows this channel by. */
+export const CHANNEL_TYPE = 'imessage';
+
+/** The registry id of the choice affordance the answer link belongs to. */
+export const ANSWER_LINK_DECORATION_ID = 'decision_card';
+
+/** Decides which decorations the registry lets this channel render. */
+export type DecorationGate = typeof admitDecorations;
+
 export interface RenderOptions {
-  /** Absolute answer-link URL for a choice card. When set, the rendered
-   *  choice invites a tap on the link (native/web selection UI) while the
-   *  text options stay listed — replying by text always keeps working. */
+  /** Absolute answer-link URL for a choice card. Rendered only when the
+   *  decoration registry declares the choice affordance for this channel
+   *  ({@link ANSWER_LINK_DECORATION_ID}); the numbered text list stays the
+   *  way to answer either way. */
   choiceLinkUrl?: string;
+  /** Conversation key for the speaker history (name-line decision). */
+  conversationKey?: string;
+  /** Who spoke in which conversation. Defaults to a fresh, empty store. */
+  speakerHistory?: SpeakerHistoryStore;
+  /** Decoration gate; defaults to the SDK registry. Injectable for tests. */
+  admit?: DecorationGate;
+}
+
+export interface RenderedAnswer {
+  /** The ordered bubbles to send. */
+  readonly bubbles: readonly string[];
+  /** Ids of the registry decorations attached on top of the text. */
+  readonly decorations: readonly string[];
+}
+
+/** True when the registry lets this channel render the answer-link affordance. */
+export function isAnswerLinkAdmitted(admit: DecorationGate = admitDecorations): boolean {
+  return admit(CHANNEL_TYPE, [{ id: ANSWER_LINK_DECORATION_ID }]).admitted.length > 0;
 }
 
 /**
  * Render the orchestrator's channel-agnostic {@link SemanticAnswer} into a
  * single iMessage text message.
  *
- * iMessage (via Sendblue) is PLAIN TEXT — no markdown, no `*bold*`
- * convention, no inline keyboards. Every richer element degrades to text: a
- * choice card becomes a "reply with one of these" list, follow-ups become
- * copyable suggestions, and attachments become links. This matches the SDK's
- * documented graceful-degradation contract for connectors without rich UI.
- * A choice card can additionally carry an answer link (deep-link concept
- * Phase 1) — see {@link RenderOptions.choiceLinkUrl}.
+ * iMessage (via Sendblue) is PLAIN TEXT, so the answer is rendered by the SDK
+ * reference renderer (`renderPlainAnswer`, spec 2042 §5.14): the answer text,
+ * a plain name line only where INV-4 asks for one, colleagues' contributions
+ * as "Mira: ...", a `system` notice as its own text, a card as numbered text.
+ * No chips, footers, follow-up lists or disclaimers: those are not declared
+ * decorations for this channel. The AI disclosure line is already part of
+ * `answer.text` (the operator's `ai_disclosure_frequency`). Markdown in the
+ * model-authored fields is degraded to plain text first.
  */
 export function renderAnswer(a: SemanticAnswer, opts?: RenderOptions): string {
   return renderAnswerBubbles(a, opts).join('\n\n');
@@ -30,36 +62,83 @@ export function renderAnswer(a: SemanticAnswer, opts?: RenderOptions): string {
 
 /**
  * Render into the ordered list of iMessage bubbles to send. Normally one
- * bubble; a choice card WITH an answer link yields two — the text, then the
- * bare URL on its own. iMessage only unfurls a link into a preview card when
- * the message consists of nothing but the URL; embedded in text it stays an
- * inline link. The text bubble stays self-sufficient (options listed), so a
- * failed second send still leaves an answerable question.
+ * bubble; a choice card WITH an admitted answer link yields two: the text,
+ * then the bare URL on its own. iMessage only unfurls a link into a preview
+ * card when the message consists of nothing but the URL; embedded in text it
+ * stays an inline link. The text bubble stays self-sufficient (options
+ * listed), so a failed second send still leaves an answerable question.
  */
 export function renderAnswerBubbles(a: SemanticAnswer, opts?: RenderOptions): string[] {
+  return [...renderAnswerParts(a, opts).bubbles];
+}
+
+export function renderAnswerParts(a: SemanticAnswer, opts: RenderOptions = {}): RenderedAnswer {
+  const admit = opts.admit ?? admitDecorations;
+  const history = opts.speakerHistory ?? new InMemorySpeakerHistoryStore();
+  const plain = renderPlainAnswer(plainTextAnswer(a), {
+    nativeIdentity: false,
+    conversationKey: opts.conversationKey ?? CHANNEL_TYPE,
+    speakerHistory: history,
+  });
+
+  const isSystem = a.speaker?.kind === 'system';
   const parts: string[] = [];
+  if (plain.length > 0) parts.push(plain);
 
-  const body = mdToPlainText(a.text).trim();
-  if (body) parts.push(body);
-
-  const linkUrl = a.interactive?.kind === 'choice' ? opts?.choiceLinkUrl : undefined;
-  if (a.interactive?.kind === 'choice') {
-    parts.push(renderChoice(a.interactive, Boolean(linkUrl)));
-  }
-
-  const links = renderAttachments(a.attachments);
+  const links = isSystem ? undefined : renderAttachments(a.attachments);
   if (links) parts.push(links);
 
-  if (a.followUps && a.followUps.length > 0) {
-    parts.push(renderFollowUps(a.followUps));
+  const decorations: string[] = [];
+  const hasChoice = !isSystem && a.interactive?.kind === 'choice';
+  const linkUrl =
+    hasChoice && opts.choiceLinkUrl && isAnswerLinkAdmitted(admit) ? opts.choiceLinkUrl : undefined;
+  if (linkUrl) {
+    // The URL itself follows as its own bubble.
+    parts.push('Oder wähle hier aus:');
+    decorations.push(ANSWER_LINK_DECORATION_ID);
   }
-
-  if (a.disclaimer) parts.push(mdBlock(a.disclaimer));
 
   const text = parts.join('\n\n');
   const bubbles = text.trim().length > 0 ? [text] : [];
   if (linkUrl) bubbles.push(linkUrl);
-  return bubbles;
+  return { bubbles, decorations };
+}
+
+/**
+ * A copy of the answer whose model-authored text fields are plain text. The
+ * SDK renderer lays the answer out; it does not know iMessage shows no markup.
+ */
+function plainTextAnswer(a: SemanticAnswer): SemanticAnswer {
+  return {
+    ...a,
+    text: mdBlock(a.text),
+    ...(a.contributions
+      ? { contributions: a.contributions.map((c) => ({ ...c, text: mdBlock(c.text) })) }
+      : {}),
+    ...(a.systemNotice ? { systemNotice: { ...a.systemNotice, text: mdBlock(a.systemNotice.text) } } : {}),
+    ...(a.interactive ? { interactive: plainInteractive(a.interactive) } : {}),
+  };
+}
+
+function plainInteractive(interactive: OutgoingInteractive): OutgoingInteractive {
+  switch (interactive.kind) {
+    case 'choice':
+      return {
+        ...interactive,
+        question: mdBlock(interactive.question),
+        options: interactive.options.map((o) => ({ ...o, label: mdInline(o.label) })),
+      };
+    case 'topic':
+      return {
+        ...interactive,
+        question: mdBlock(interactive.question),
+        topics: interactive.topics.map((t) => ({ ...t, label: mdInline(t.label) })),
+      };
+    case 'slots':
+      return { ...interactive, question: mdBlock(interactive.question) };
+    default:
+      return interactive;
+  }
 }
 
 /**
@@ -386,27 +465,6 @@ function mdInline(value: string): string {
  */
 function mdBlock(value: string | undefined | null): string {
   return typeof value === 'string' ? mdToPlainText(value).trim() : '';
-}
-
-function renderChoice(choice: OutgoingChoiceCard, hasLink: boolean): string {
-  // Every field here is model-authored, so `**Welche Variante**` in a question
-  // is routine — degrading only `answer.text` left that raw in the bubble.
-  const lines = [mdBlock(choice.question)];
-  if (choice.rationale) lines.push(mdBlock(choice.rationale));
-  for (const opt of choice.options) lines.push(`• ${mdInline(opt.label)}`);
-  if (hasLink) {
-    // The URL itself follows as its own bubble (see renderAnswerBubbles).
-    lines.push('Antworte mit einer der Optionen — oder wähle hier aus:');
-  } else {
-    lines.push('Bitte antworte mit einer der Optionen.');
-  }
-  return lines.join('\n');
-}
-
-function renderFollowUps(followUps: FollowUpOption[]): string {
-  const lines = ['💡 Du kannst auch fragen:'];
-  for (const f of followUps.slice(0, 5)) lines.push(`• ${mdInline(f.prompt)}`);
-  return lines.join('\n');
 }
 
 function renderAttachments(items: OutgoingAttachment[] | undefined): string | undefined {

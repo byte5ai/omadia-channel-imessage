@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.4.0
+
+Agents as colleagues (epic byte5ai/omadia#2042, issue #2). **Needs a kernel
+that provides the speaker, plain-text renderer, decoration registry and pace
+contracts (omadia#2045, #2086, #2087, branch S6): do not publish before that
+kernel runs on the target instance.**
+
+- **Answers render through the SDK plain-text renderer** (`renderPlainAnswer`).
+  A name line (`Mira:`) only where the speaker would be unclear (a second agent
+  spoke in the conversation, or the speaker changed), never on every message.
+  A consulted colleague's contribution is a plain `Mira: ...` paragraph. A kernel
+  `system` notice is its own text, not under an agent's name.
+- **Removed: follow-up lists (`💡 Du kannst auch fragen`) and the disclaimer
+  line.** They are not declared decorations for this channel. The AI disclosure
+  stays in the answer text as the operator's `ai_disclosure_frequency` renders it.
+- **Choice cards are numbered** (`1) ...`) and answered by replying with the
+  number; the plugin maps a bare number back to the option's value. The
+  "Bitte antworte mit einer der Optionen" line is gone.
+- **The choice answer link is no longer sent** while the decoration registry
+  does not declare `decision_card` for `imessage` (it lists Teams and web only).
+  Routes, store and settings are unchanged and the link returns once declared.
+- **One emitter.** Every message, an agent's answer or a notice of the channel,
+  carries its speaker (`system` for the channel's own notices) and leaves through
+  `src/emit.ts`; a test counts the `sendMessage` call sites.
+- **Agent selection.** The sender's principal is passed to the channel resolver
+  so the kernel can apply the user's `/agent <Name>` selection ahead of a binding.
+  `/agent ...` is sent to omadia unchanged (no parser in the plugin; iMessage has
+  no native commands) and the kernel's notice is shown. An unavailable agent is
+  named in the kernel's system notice and never replaced by another agent
+  (INV-7). See "Resolver contract" below for the final rules.
+- **Pace.** The agent call runs through `runPacedTurn`: typing indicator, one
+  acknowledgement after about 8 s (under the agent's speaker, see below), no
+  progress chatter. There is no reply window
+  (the webhook is answered at once).
+- **Resolver contract (omadia#2055, S1).** The channel resolver answers `bound` or
+  `reject` (no `fallback`, no `match`). The first key (sender, then line) that
+  binds decides; a reject that names an agent ends the search (INV-7). On a
+  reject the text still goes to the resolver's ChatAgent (it carries out
+  `/agent`, `/agent` empty = clear, `/agents` = list) and only its `system`
+  answer is sent; an agent-voiced answer on a reject is withheld. Without a
+  ChatAgent or notice the channel's own "no agent assigned" text goes out as
+  `system`. No `agentSelection` use, no `parseAgentCommand`, no extra
+  `optional_requires`.
+- **Principal** is `channelUserPrincipal({ kind: 'custom', id: <number> })`,
+  `user:custom:+49…` (was `user:<number>`). `custom` because `ChannelUserKind`
+  has no iMessage member and the turn's `userRef` must use one; the kernel derives
+  the same principal from it. No e-mail: Sendblue does not verify one.
+- **Speaker up front.** The pace acknowledgement is sent under the agent the
+  resolver named before the answer (`ChannelResolveResult.speaker`), not as
+  `system`. An answer without a speaker takes the resolver's speaker; with
+  neither it is **withheld** and the sender gets a `system` notice (fail-closed;
+  the old "warn and send anyway" is gone). Without a resolver no speaker is known
+  beforehand and no acknowledgement is sent.
+- **Send providers, polls and cards as text (criterion 30).** `TargetedSend` and
+  `ConversationSend` providers deliver plain text and declare nothing else (no
+  `poll`, `card`, `asChannelKey`, `mentions`, `aiLabel`). Polls and question cards
+  need no plugin code: the kernel posts them as numbered text and turns a typed
+  reply into the `card_answer` (omadia c510bf5c4). The plugin reports every
+  accepted inbound message as a `created` conversation message (direct,
+  `addressedToBot: true`, no `replyToMessageId`: Sendblue reports none) and starts
+  no turn where the kernel reads every message (`conversationDelivery` `all`).
+  The report is `await core.reportConversationMessage(event)` (omadia 28da9b54a,
+  capped at 1.5 s): `answeredCard: true` means the kernel took the message as the
+  typed answer, so **no turn** (no acknowledgement, no agent answer); a timeout or
+  failure counts as not consumed and the turn runs. Without the method the event
+  is emitted fire-and-forget and the turn runs as before.
+  Numbers outside the allowlist are `not_permitted`.
+- **No singleton fallback.** With a resolver published every turn, a refusal
+  included, uses the ChatAgent of the resolve result (`resolveChannelRoute`);
+  `chatAgent@1` (a refuser since S1) is looked up per turn and only on a host
+  without a resolver. Activation no longer fails when it is absent.
+- **Selection key** is the sender number (narrowest conversation key), the line
+  second; rank and its consequence are documented in the README. No locale is
+  passed (Sendblue does not report one).
+- **compat.core** is the placeholder `>=1.75.0 <2.0` (the parent session sets the
+  final floor and the version when the kernel lands).
+- README (EN, DE): per-agent identity is **not supported** (one Sendblue line
+  per installation; what multiple lines would take and why it is not built),
+  `/agent` selection, what an answer looks like, groups unsupported.
+- Tests: criterion 5 (emitter paths), 29/30 (plain text, channel parity),
+  31 (decoration registry), resolution order, pace with a manual clock. The
+  suite runner now aliases both the channel SDK and plugin-api dists
+  (`OMADIA_CHANNEL_SDK_DIST`, `OMADIA_PLUGIN_API_DIST`).
+
 ## 0.3.1
 
 - **A conversation without an Agent is refused in the chat**

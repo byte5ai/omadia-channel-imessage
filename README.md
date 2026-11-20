@@ -22,7 +22,7 @@ omadia is a self-hostable agentic OS: compose multi-agent teams from signed plug
 
 ## What it does
 
-Connects iMessage to omadia through Sendblue, a hosted iMessage relay with a REST API. One-to-one chats sent to your Sendblue line are routed into the omadia orchestrator, and the reply comes back in the same chat (with a best-effort typing indicator while the agent thinks). You can limit access with a phone-number allowlist. Group chats are not supported in v1 and are dropped.
+Connects iMessage to omadia through Sendblue, a hosted iMessage relay with a REST API. One-to-one chats sent to your Sendblue line are routed into the omadia orchestrator, and the reply comes back in the same chat (with a best-effort typing indicator while the agent thinks). You can limit access with a phone-number allowlist. Group chats are not supported and are dropped. Users choose the agent they talk to with `/agent <Name>` (see [Agents as colleagues](#agents-as-colleagues)).
 
 > ⚠️ **Note:** Apple offers no public iMessage API — Sendblue is an unofficial relay, so continuity depends on the provider. The connector is provider-swappable: only the thin REST client (`src/sendblueClient.ts`) is Sendblue-specific.
 
@@ -69,8 +69,19 @@ It needs an LLM provider assigned to the orchestrator first.
 
 ## Answer links (interactive choices)
 
-iMessage cannot render choice buttons. With `public_base_url` set, an answer
-carrying an interactive choice card additionally includes a capability URL:
+> **Inactive until omadia declares it.** Since 0.4.0 every element the channel
+> adds around an answer must be declared in omadia's decoration registry. The
+> registry entry `decision_card` (the choice affordance) lists `teams` and `web`
+> as channels, not `imessage`, so the link is **not sent** for now; a choice card
+> arrives as a numbered list and a reply like `2` answers it. What is missing is
+> that one entry in the kernel's `decorations.ts` (its channel list, with the
+> written justification: a link tap versus typing a digit). The routes and the
+> code below stay in place and the link returns on its own once the registry
+> declares it for `imessage`.
+
+iMessage cannot render choice buttons. With `public_base_url` set and the
+affordance declared, an answer carrying an interactive choice card additionally
+includes a capability URL:
 
 ```
 https://<public_base_url>/api/imessage/a/<token>
@@ -125,17 +136,152 @@ Routes (mounted on the same public router as the webhook):
 | `GET /api/imessage/answers/:token` | Structured JSON payload (API clients; a mobile-app handoff is not wired yet). |
 | `POST /api/imessage/answers/:token/reply` | Accept `{ "value": … }`; `202`, then the turn runs detached. |
 
+## Agents as colleagues
+
+### Reaching an agent: one line, `/agent <Name>`
+
+**Own identity per agent is not supported by this plugin.** One installation
+uses one Sendblue line (`from_number`), so every agent answers from the same
+phone number. What is possible on the provider side: Sendblue lets one account
+hold several lines, chooses the sending line with `from_number` and reports the
+receiving line as `sendblue_number` in the inbound webhook. A plugin could
+therefore run one line per agent. This one does not, because:
+
+- every further line is a separate Sendblue line for the operator, and the
+  provider does not publish multi-line pricing (it appears to be a sales
+  conversation, partly an enterprise feature): check Sendblue's current terms;
+- sessions, answer links and the allowlist are keyed on the sender's number
+  today, so a second line needs a new conversation key (line + sender) or two
+  agents would share one chat history;
+- omadia has no contract yet for "this line **is** that agent's identity" that
+  outranks a user's selection (see the open questions of the 0.4.0 PR).
+
+Instead the user picks the agent by text, in the 1:1 chat:
+
+```
+/agent Mira     use Mira in this conversation
+/agent          clear my choice (the binding applies again)
+/agents         list the agents available to me here
+```
+
+iMessage has no native bot commands, so the plugin does **not** parse these: the
+message goes to omadia unchanged, the ChatAgent omadia's channel resolver returns
+carries out the command (it stores the user's selection, or lists the agents) and
+answers with a short system notice. An empty `/agent` clears the selection; the
+list is `/agents`. This also works for a sender no agent serves yet (the resolver
+rejects the turn, and its ChatAgent still answers the command). Only agents
+available to that user in iMessage can be selected.
+
+The sender is identified by the SDK principal `user:custom:<number>` (for example
+`user:custom:+491701234567`), the one form every channel uses, so two people
+texting the same line each keep their own agent, also after a restart (the
+selection lives in omadia, not in this plugin). The kind is `custom`, the slot
+the channel SDK offers for channels outside its closed list, because the turn's
+`userRef` must use it and omadia derives the same principal from it elsewhere.
+No e-mail address is attached: Sendblue states a phone number, never a verified
+e-mail.
+
+### What an answer looks like
+
+Plain text, as a colleague would write it:
+
+- the answer text; **no name line** while one agent talks in the conversation.
+  A line `Mira:` appears only when a second agent has spoken in the conversation
+  or the speaker changed (the speaker history is in memory: after a restart the
+  next answer may carry one line too many, never one too few);
+- a colleague consulted by the agent appears as a plain `Mira: ...` paragraph;
+- a notice of omadia itself (agent disabled, not available to you, ...) is its
+  own text, never under an agent's name;
+- a choice is a numbered list; replying with the number answers it;
+- the AI disclosure line is part of the text as the operator's disclosure
+  frequency setting says. No follow-up lists, verifier badges, source chips or
+  "shorter / more detail" prompts; the details stay in omadia and can be asked
+  for in words.
+
+For long work the agent shows the typing indicator, says once that it is on it
+("Ich kümmere mich darum, das dauert einen Moment.") after about 8 seconds, and
+answers when done. The acknowledgement goes out under the agent that was resolved
+for the turn (the resolver names it before the answer), in the agent's words,
+with the usual name line only where INV-4 asks for one. On a host without a
+channel resolver no agent is known beforehand and no acknowledgement is sent
+(the typing indicator stays).
+
+An answer that carries no speaker, and for which the resolver named none, is
+**withheld**: the sender gets a short system notice that something went wrong, the
+operator log gets an error. A path that cannot name its speaker cannot emit.
+
+### Groups
+
+Group chats are not supported: they are dropped (`src/inbound.ts`), so no
+agent is present in a group and no roster provider is needed. Agents work in
+1:1 chats only.
+
 ## Agent binding (operator channels dashboard)
 
 The plugin contributes its configured line to the operator channels dashboard
 (`GET /api/v1/operator/channels`), so the line is a pickable binding key.
-Binding an Agent to the **line** (`from_number`) makes it the default for every
-conversation on that line; a binding on a specific **sender E.164** wins over
-it. A conversation with neither binding is answered by the platform fallback
-Agent. If none is set either, the turn is refused: the sender is told that no
-Agent is assigned to the conversation, and no orchestrator runs. On a host
-without the multi-Agent registry, its single orchestrator answers every
-conversation.
+Per turn the plugin asks omadia's channel resolver with the sender's number
+first and the line second, and passes the sender's principal. The resolver
+answers `bound` or `reject`; there is no fallback agent. The first key that
+binds decides. A user's own selection (`/agent`), a binding and the
+default-agent table are applied by the resolver within one key. If the agent
+that was addressed or bound may not serve the conversation (disabled, deleted,
+not available to the sender), the sender gets omadia's system notice naming it,
+and no other agent answers in its place: that reject ends the search. If nothing
+addresses an agent at all, the sender is told that no Agent is assigned (the
+line key is still tried before). On a reject no agent runs; only a `system`
+message goes out, never an agent's words. On a host without the multi-Agent
+registry, its single orchestrator answers every conversation.
+
+**Selection key.** omadia ties an agent selection to the narrowest conversation
+key of the turn (the `channelKey` of the resolve call) plus the sender's
+principal. In an iMessage chat that key is the **sender's number**: it is the
+conversation, and it is what the plugin passes first, so a user's `/agent`
+selection and a binding on a sender number both live there. The **line** is the
+second key, kept because the channel directory lists it as a binding key. Rank:
+
+1. the sender key: selection, then binding, then the default-agent table
+   (applied by omadia within the key); a `bound` answer here is final;
+2. the line key, only when the sender key rejected without naming an agent.
+
+Consequence: a default-agent entry that names an agent for the sender key hides
+a binding set on the line only. Bind the line only when the default table is
+`off` for this channel, or bind the sender numbers. A `/agent` typed while only
+the line binds is stored under the line key.
+
+The plugin never falls back to the single `chatAgent@1` orchestrator while a
+resolver is published, a refusal included: every turn uses the ChatAgent of the
+resolve result. Only a host without a resolver (no multi-agent registry) uses the
+singleton. No locale is passed to the resolver: Sendblue does not report the
+person's language, so omadia's notices come in its default.
+
+## Proactive messages, polls and question cards
+
+A facilitation or a Conductor step can post into an iMessage conversation: the
+channel registers TargetedSend and ConversationSend providers that deliver plain
+text (attachments go out as link lines, there is no outbound media; a principal is
+addressed as `user:custom:<number>`; numbers outside the `allowlist` are refused
+as not permitted). They declare **no** poll, card, "as an agent's own identity"
+(all agents share the Sendblue line, so omadia refuses such a send), mention or AI
+label capability.
+
+A poll or question card needs no code in this plugin. iMessage cannot render a
+card, so omadia itself posts it as numbered text through the conversation send,
+remembers the open question and turns a fitting typed reply (`2`, `1,3`, `Ja`,
+...) into the typed `card_answer`, deterministically and without a model. For that
+it has to see the reply, so the plugin reports every accepted inbound message as a
+`created` conversation message: direct, `addressedToBot: true` (every iMessage is a
+direct message to the line), author the number Sendblue states. Sendblue reports no
+reply-to message id, so `replyToMessageId` is never set; with one open question in
+the conversation the addressed reply is enough. The plugin reports the message with
+`reportConversationMessage` and waits for the kernel's verdict before starting a
+turn: when omadia took the message as the typed answer (`answeredCard`), **no turn
+starts** (no acknowledgement, no agent answer; the agent does not also answer
+"2"). The wait is capped at 1.5 s: a slow or failing report means "not consumed"
+and the turn runs. Where omadia reads every message of a conversation itself
+(`conversationDelivery` is `all`) the event is the only path and no turn is
+started. On a kernel without `reportConversationMessage` the message is emitted
+without waiting and the turn runs as before.
 
 ## Privacy & data transit
 

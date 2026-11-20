@@ -10,7 +10,7 @@
  * dist (same source the tsconfig `paths` typecheck uses) because plugin.ts
  * imports runtime values from it (isNoReply, getChatAgent). Build it first:
  * `npm run build` in `../omadia/middleware/packages/harness-channel-sdk`.
- * `@omadia/plugin-api` stays external — tests only use its types (erased).
+ * `@omadia/plugin-api` is aliased the same way (the SDK dist imports it).
  */
 
 import { spawnSync } from 'node:child_process';
@@ -25,10 +25,16 @@ const pkgRoot = resolve(here, '..');
 const testsDir = join(pkgRoot, 'tests');
 const outDir = join(pkgRoot, '.test-build');
 
-const channelSdkDist = resolve(
-  pkgRoot,
-  '../omadia/middleware/packages/harness-channel-sdk/dist/index.js',
-);
+// OMADIA_CHANNEL_SDK_DIST overrides the default sibling-checkout location, so
+// the suite also runs against a kernel worktree that lives elsewhere.
+const channelSdkDist =
+  process.env.OMADIA_CHANNEL_SDK_DIST ??
+  resolve(pkgRoot, '../omadia/middleware/packages/harness-channel-sdk/dist/index.js');
+// The channel SDK re-exports runtime values from plugin-api (speaker, cards),
+// so its dist needs plugin-api resolvable too; it sits next to the SDK package.
+const pluginApiDist =
+  process.env.OMADIA_PLUGIN_API_DIST ??
+  resolve(dirname(channelSdkDist), '../../plugin-api/dist/index.js');
 if (!existsSync(channelSdkDist)) {
   console.error(
     `@omadia/channel-sdk dist not found at ${channelSdkDist}\n` +
@@ -60,10 +66,10 @@ await build({
   logLevel: 'error',
   alias: {
     '@omadia/channel-sdk': channelSdkDist,
+    '@omadia/plugin-api': pluginApiDist,
   },
-  // express is a real devDependency (resolved from node_modules at runtime);
-  // plugin-api is type-only in src/, so the import is erased anyway.
-  external: ['@omadia/plugin-api', 'express'],
+  // express is a real devDependency (resolved from node_modules at runtime).
+  external: ['express'],
 });
 
 const built = readdirSync(outDir)
