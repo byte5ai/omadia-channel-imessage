@@ -61,6 +61,11 @@ kernel runs on the target instance.**
   accepted inbound message as a `created` conversation message (direct,
   `addressedToBot: true`, no `replyToMessageId`: Sendblue reports none) and starts
   no turn where the kernel reads every message (`conversationDelivery` `all`).
+  The report is `await core.reportConversationMessage(event)` (omadia 28da9b54a,
+  capped at 1.5 s): `answeredCard: true` means the kernel took the message as the
+  typed answer, so **no turn** (no acknowledgement, no agent answer); a timeout or
+  failure counts as not consumed and the turn runs. Without the method the event
+  is emitted fire-and-forget and the turn runs as before.
   Numbers outside the allowlist are `not_permitted`.
 - **No singleton fallback.** With a resolver published every turn, a refusal
   included, uses the ChatAgent of the resolve result (`resolveChannelRoute`);

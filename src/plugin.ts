@@ -132,6 +132,7 @@ export async function activate(
     pending: new PendingChoices(),
     ...(deps.admitDecorations ? { admit: deps.admitDecorations } : {}),
     ...(deps.paceClock ? { paceClock: deps.paceClock } : {}),
+    ...(deps.reportTimeoutMs !== undefined ? { reportTimeoutMs: deps.reportTimeoutMs } : {}),
   };
 
   // The path template shown to the operator (admin UI + logs). The secret is
@@ -279,9 +280,15 @@ export async function activate(
     // — the user answered in iMessage, so a later link tap must 409.
     answerStore.resolveOpenForConversation(result.turn.conversationId, 'text');
     // The kernel reads a typed reply to a card or poll it posted as text from
-    // this event. Where it reads EVERY message of the conversation itself (a
-    // facilitation in `all` mode) the event is the only path: no turn.
-    if (reportInbound(runtime, body, result.turn)) return;
+    // this event and tells us when it took the message as the answer (no turn,
+    // or the agent would answer "2" as well). Where it reads EVERY message of
+    // the conversation itself (`all` mode) the event is the only path: no turn.
+    if (await reportInbound(runtime, body, result.turn)) {
+      // A consumed answer closes the numbered question the conversation was
+      // asked: the digit was not meant for it.
+      runtime.pending.resolve(result.turn.conversationId, result.turn.text);
+      return;
+    }
     // A bare number answers the numbered question the conversation was asked.
     const text = runtime.pending.resolve(result.turn.conversationId, result.turn.text);
     await handleTurn(runtime, text === result.turn.text ? result.turn : { ...result.turn, text });
@@ -323,6 +330,8 @@ export interface ActivationDeps {
   admitDecorations?: DecorationGate;
   /** Timer seam for the pace behaviour (tests). */
   paceClock?: PaceClock;
+  /** How long the report of an inbound message may hold the turn back (tests). */
+  reportTimeoutMs?: number;
 }
 
 /** Everything a turn needs besides the turn itself. */
@@ -336,6 +345,7 @@ interface TurnRuntime {
   pending: PendingChoices;
   admit?: DecorationGate;
   paceClock?: PaceClock;
+  reportTimeoutMs?: number;
 }
 
 /** What the turn hands to the agent: the text, the session, the sender. */
@@ -348,35 +358,69 @@ function chatInput(turn: IncomingTurn): Parameters<ChatAgent['chat']>[0] {
   };
 }
 
+/** How long the report of an inbound message may hold the turn back. */
+const REPORT_TIMEOUT_MS = 1_500;
+
 /**
  * Report an accepted inbound message to the kernel as a `created` conversation
- * message (fire-and-forget; a failing report never fails the turn). `true` when
- * the kernel reads every message of this conversation itself
- * (`conversationDelivery` is `all`): then the event is the only path and the
- * channel starts no turn. Without the kernel seams nothing is reported and the
- * turn runs.
+ * message. `true` when the channel starts NO turn for it:
+ *  - the kernel took it as the typed answer to an open question (a card or poll
+ *    it posted as text): `reportConversationMessage` says so, and the agent
+ *    must not also answer "2". The report waits for the kernel's decision, but
+ *    never longer than {@link REPORT_TIMEOUT_MS}: a slow or failing kernel means
+ *    `answeredCard` unknown, i.e. false, and the turn runs as before;
+ *  - the kernel reads every message of this conversation itself
+ *    (`conversationDelivery` is `all`): the event is then the only path.
+ * Without `reportConversationMessage` the message is emitted fire-and-forget
+ * (`emitConversationMessage`); without either nothing is reported. A failing
+ * report is logged and never fails or delays the turn beyond the timeout.
  */
-function reportInbound(rt: TurnRuntime, body: unknown, turn: IncomingTurn): boolean {
+async function reportInbound(rt: TurnRuntime, body: unknown, turn: IncomingTurn): Promise<boolean> {
   const { core } = rt;
-  if (typeof core.emitConversationMessage !== 'function') return false;
+  const report = core.reportConversationMessage;
+  const emit = core.emitConversationMessage;
+  if (typeof report !== 'function' && typeof emit !== 'function') return false;
   const line = rt.state.me?.fromNumber ?? '';
+  const event = createdEventFor(body as SendbluePayload, {
+    channelId: turn.channelId,
+    channelType: CHANNEL_TYPE,
+    line,
+    conversationId: turn.conversationId,
+    text: turn.text,
+    now: Date.now(),
+  });
   try {
-    core.emitConversationMessage(
-      createdEventFor(body as SendbluePayload, {
-        channelId: turn.channelId,
-        channelType: CHANNEL_TYPE,
-        line,
-        conversationId: turn.conversationId,
-        text: turn.text,
-        now: Date.now(),
-      }),
-    );
-    return core.conversationDelivery?.(CHANNEL_TYPE, turn.conversationId, line) === 'all';
+    if (typeof report === 'function') {
+      if (await answeredCardWithin(report.call(core, event), rt.reportTimeoutMs ?? REPORT_TIMEOUT_MS)) return true;
+    } else {
+      emit?.call(core, event);
+    }
   } catch (err) {
     core.log('warn', 'iMessage conversation message report failed (ignored)', {
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+  // Independent of the report: where the kernel reads everything, no turn.
+  try {
+    return core.conversationDelivery?.(CHANNEL_TYPE, turn.conversationId, line) === 'all';
+  } catch (err) {
+    core.log('warn', 'iMessage conversation delivery lookup failed (ignored)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
+  }
+}
+
+/** The kernel's `answeredCard`, or `false` once `timeoutMs` has passed. */
+async function answeredCardWithin(pending: Promise<{ answeredCard: boolean }>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ answeredCard: boolean }>((resolve) => {
+    timer = setTimeout(() => resolve({ answeredCard: false }), timeoutMs);
+  });
+  try {
+    return (await Promise.race([pending, timeout])).answeredCard === true;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -335,10 +335,16 @@ meldet jede angenommene eingehende Nachricht als `created`-Konversationsnachrich
 (direkt, `addressedToBot: true`, weil jede iMessage eine Direktnachricht an die
 Line ist, Autor ist die von Sendblue genannte Nummer). Sendblue liefert keine
 Reply-to-Nachrichten-ID, `replyToMessageId` wird also nie gesetzt; bei genau einer
-offenen Frage in der Unterhaltung reicht die adressierte Antwort. Liest omadia
-alle Nachrichten einer Unterhaltung selbst (`conversationDelivery` ist `all`), ist
-das Event der einzige Weg und es startet kein Turn; sonst erreicht die Antwort den
-Agenten weiter wie getippt.
+offenen Frage in der Unterhaltung reicht die adressierte Antwort. Das Plugin meldet die Nachricht mit
+`reportConversationMessage` und wartet auf das Urteil des Kernels, bevor es einen
+Turn startet: Hat omadia die Nachricht als getippte Antwort genommen
+(`answeredCard`), startet **kein Turn** (keine Bestätigung, keine Agentenantwort;
+der Agent antwortet nicht zusätzlich auf „2“). Das Warten ist auf 1,5 s begrenzt:
+Ein langsamer oder fehlschlagender Report heißt „nicht verbraucht“, und der Turn
+läuft. Liest omadia alle Nachrichten einer Unterhaltung selbst
+(`conversationDelivery` ist `all`), ist das Event der einzige Weg und es startet
+kein Turn. Auf einem Kernel ohne `reportConversationMessage` wird die Nachricht
+ohne Warten gemeldet und der Turn läuft wie bisher.
 
 ## Datenschutz & Datentransit
 

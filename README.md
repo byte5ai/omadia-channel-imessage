@@ -273,9 +273,15 @@ it has to see the reply, so the plugin reports every accepted inbound message as
 `created` conversation message: direct, `addressedToBot: true` (every iMessage is a
 direct message to the line), author the number Sendblue states. Sendblue reports no
 reply-to message id, so `replyToMessageId` is never set; with one open question in
-the conversation the addressed reply is enough. Where omadia reads every message of
-a conversation itself (`conversationDelivery` is `all`) the event is the only path
-and no turn is started; otherwise the reply still reaches the agent as typed.
+the conversation the addressed reply is enough. The plugin reports the message with
+`reportConversationMessage` and waits for the kernel's verdict before starting a
+turn: when omadia took the message as the typed answer (`answeredCard`), **no turn
+starts** (no acknowledgement, no agent answer; the agent does not also answer
+"2"). The wait is capped at 1.5 s: a slow or failing report means "not consumed"
+and the turn runs. Where omadia reads every message of a conversation itself
+(`conversationDelivery` is `all`) the event is the only path and no turn is
+started. On a kernel without `reportConversationMessage` the message is emitted
+without waiting and the turn runs as before.
 
 ## Privacy & data transit
 

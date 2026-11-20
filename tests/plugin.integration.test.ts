@@ -1172,11 +1172,15 @@ describe('plugin.activate — send providers and conversation events (spec 2042 
     provider: TargetedSendProvider | ConversationSendProvider;
   }
 
-  async function startWithCore(config: Record<string, string> = {}, coreExtra: Record<string, unknown> = {}) {
+  async function startWithCore(
+    config: Record<string, string> = {},
+    coreExtra: Record<string, unknown> = {},
+    deps: ActivationDeps = {},
+  ) {
     const targeted: Registered[] = [];
     const conversation: Registered[] = [];
     const events: ConversationMessageEvent[] = [];
-    const h = await startHarness({ ...config }, {}, {}, {
+    const h = await startHarness({ ...config }, {}, deps, {
       registerTargetedSendProvider: (channelId: string, provider: TargetedSendProvider) =>
         targeted.push({ channelId, provider }),
       registerConversationSendProvider: (channelId: string, provider: ConversationSendProvider) =>
@@ -1423,6 +1427,122 @@ describe('plugin.activate — send providers and conversation events (spec 2042 
     } finally {
       await h.close();
     }
+  });
+
+  describe('reportConversationMessage: a consumed typed answer starts no turn', () => {
+    const reporting = (impl: (event: ConversationMessageEvent) => Promise<{ answeredCard: boolean }>) => {
+      const reported: ConversationMessageEvent[] = [];
+      const emitted: ConversationMessageEvent[] = [];
+      return {
+        reported,
+        emitted,
+        extra: {
+          reportConversationMessage: (event: ConversationMessageEvent) => {
+            reported.push(event);
+            return impl(event);
+          },
+          emitConversationMessage: (event: ConversationMessageEvent) => emitted.push(event),
+        },
+      };
+    };
+
+    it('answeredCard true: no turn, no pace acknowledgement, no agent answer, no send', async () => {
+      const clock = manualClock();
+      const r = reporting(async () => ({ answeredCard: true }));
+      const { h } = await startWithCore({}, r.extra, { paceClock: clock.clock });
+      try {
+        await postWebhook(h.base, SECRET, inbound({ content: '2' }));
+        await waitFor(() => r.reported.length === 1, 'reported');
+        await new Promise((res) => setTimeout(res, 50));
+        await clock.advance(60_000);
+        assert.equal(h.chatCalls.length, 0, 'the agent must not also answer "2"');
+        assert.equal(h.sends.length, 0, 'no acknowledgement and no answer');
+        assert.equal(r.reported[0]?.text, '2');
+        assert.equal(r.emitted.length, 0, 'reported instead of emitted, not both');
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('answeredCard false: the turn runs as usual', async () => {
+      const r = reporting(async () => ({ answeredCard: false }));
+      const { h } = await startWithCore({}, r.extra);
+      try {
+        await postWebhook(h.base, SECRET, inbound({ content: 'Hallo' }));
+        await waitFor(() => h.sends.length === 1, 'the answer');
+        assert.equal(h.chatCalls.length, 1);
+        assert.equal(r.reported.length, 1);
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('a report that takes too long never holds the turn back: it runs after the timeout', async () => {
+      const r = reporting(() => new Promise<{ answeredCard: boolean }>(() => undefined));
+      const { h } = await startWithCore({}, r.extra, { reportTimeoutMs: 40 });
+      try {
+        const started = Date.now();
+        await postWebhook(h.base, SECRET, inbound());
+        await waitFor(() => h.chatCalls.length === 1, 'turn after the timeout');
+        assert.ok(Date.now() - started >= 35, 'the turn waited for the report until the timeout');
+        await waitFor(() => h.sends.length === 1, 'the answer');
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('a failing report is logged and the turn runs', async () => {
+      const r = reporting(async () => {
+        throw new Error('kernel down');
+      });
+      const { h } = await startWithCore({}, r.extra);
+      try {
+        await postWebhook(h.base, SECRET, inbound());
+        await waitFor(() => h.chatCalls.length === 1, 'ordinary turn');
+        assert.ok(h.logs.some((l) => l.includes('report failed')));
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('delivery all still wins when the report says nothing was consumed', async () => {
+      const r = reporting(async () => ({ answeredCard: false }));
+      const { h } = await startWithCore({}, { ...r.extra, conversationDelivery: () => 'all' });
+      try {
+        await postWebhook(h.base, SECRET, inbound());
+        await waitFor(() => r.reported.length === 1, 'reported');
+        await new Promise((res) => setTimeout(res, 50));
+        assert.equal(h.chatCalls.length, 0);
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('a consumed answer also closes the numbered question the conversation was asked', async () => {
+      let consume = false;
+      const r = reporting(async () => ({ answeredCard: consume }));
+      scriptedAnswers = [
+        {
+          text: 'Zwei Slots.',
+          interactive: { kind: 'choice', question: 'Welcher?', options: [{ label: 'Di', value: 'slot-di' }, { label: 'Mi', value: 'slot-mi' }] },
+        } as SemanticAnswer,
+        { text: 'Ok.' },
+      ];
+      const { h } = await startWithCore({}, r.extra);
+      try {
+        await postWebhook(h.base, SECRET, inbound());
+        await waitFor(() => h.sends.length === 1, 'choice asked');
+        consume = true;
+        await postWebhook(h.base, SECRET, inbound({ content: '2' }));
+        await waitFor(() => r.reported.length === 2, 'second reported');
+        consume = false;
+        await postWebhook(h.base, SECRET, inbound({ content: '2' }));
+        await waitFor(() => h.chatCalls.length === 2, 'next turn');
+        assert.equal(h.chatCalls[1]?.userMessage, '2', 'the stale choice no longer maps the digit');
+      } finally {
+        await h.close();
+      }
+    });
   });
 
   it('without the emit seam the turn runs as before', async () => {
