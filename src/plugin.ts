@@ -5,24 +5,38 @@ import { Router } from 'express';
 
 import * as channelSdk from '@omadia/channel-sdk';
 import {
+  DEFAULT_PACE_PROFILE,
+  InMemorySpeakerHistoryStore,
   isNoReply,
   logNoReplyDrop,
+  runPacedTurn,
   type ChatAgent,
   type ChannelHandle,
   type CoreApi,
+  type PaceClock,
   type IncomingTurn,
+  type SemanticAnswer,
 } from '@omadia/channel-sdk';
 import type { PluginContext } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
+import {
+  CHANNEL_RESOLVER_SERVICE,
+  principalFor,
+  resolveAgentForTurn,
+  type AgentRefusal,
+  type ChannelBindingResolver,
+} from './agentResolution.js';
 import { AnswerStore } from './answerStore.js';
 import { createAnswersRouter } from './answersRouter.js';
 import {
   buildIMessageKeyDirectory,
   type ChannelDirectoryRegistryShim,
 } from './channelKeyDirectory.js';
+import { PendingChoices } from './choiceReply.js';
+import { emitAnswer, systemAnswer } from './emit.js';
 import { createLruSet, evaluateInbound, normalizePhone } from './inbound.js';
-import { renderAnswerBubbles } from './renderer.js';
+import { isAnswerLinkAdmitted, type DecorationGate } from './renderer.js';
 import { SendblueClient } from './sendblueClient.js';
 import { createChannelState, patchState, type ChannelState } from './state.js';
 import { verifyWebhookAuth, type HeaderBag } from './verify.js';
@@ -57,7 +71,11 @@ const NO_AGENT_MESSAGE =
  * delivery. Until the operator grants `/api/imessage`, that is also what
  * these routes answer.
  */
-export async function activate(ctx: PluginContext, core: CoreApi): Promise<ChannelHandle> {
+export async function activate(
+  ctx: PluginContext,
+  core: CoreApi,
+  deps: ActivationDeps = {},
+): Promise<ChannelHandle> {
   const channelId = ctx.agentId;
 
   // secrets are async (SecretsAccessor.require), config is sync
@@ -111,6 +129,23 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
 
   const state = createChannelState();
   patchState(state, { me: { fromNumber } });
+
+  // Everything one turn needs besides the turn itself. The speaker history
+  // and the open question are per conversation, in memory (a restart forgets
+  // them: an extra name line costs nothing, a forgotten number falls through
+  // to the agent as typed).
+  const runtime: TurnRuntime = {
+    ctx,
+    defaultAgent: agent,
+    core,
+    client,
+    state,
+    links,
+    speakerHistory: new InMemorySpeakerHistoryStore(),
+    pending: new PendingChoices(),
+    ...(deps.admitDecorations ? { admit: deps.admitDecorations } : {}),
+    ...(deps.paceClock ? { paceClock: deps.paceClock } : {}),
+  };
 
   // The path template shown to the operator (admin UI + logs). The secret is
   // NEVER substituted in — the page only ever sees the placeholder.
@@ -183,7 +218,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
           metadata: { via: 'answer-link' },
           rawEvent: { source: 'answer-link', token: entry.token },
         };
-        await handleTurn(ctx, agent, core, client, state, replyTurn, links);
+        await handleTurn(runtime, replyTurn);
       },
     }),
   );
@@ -243,7 +278,9 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     // A plain-text reply resolves any pending answer link of the conversation
     // — the user answered in iMessage, so a later link tap must 409.
     answerStore.resolveOpenForConversation(result.turn.conversationId, 'text');
-    await handleTurn(ctx, agent, core, client, state, result.turn, links);
+    // A bare number answers the numbered question the conversation was asked.
+    const text = runtime.pending.resolve(result.turn.conversationId, result.turn.text);
+    await handleTurn(runtime, text === result.turn.text ? result.turn : { ...result.turn, text });
   }
 
   return {
@@ -257,8 +294,17 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       directoryRegistry?.unregister(CHANNEL_TYPE);
       seen.clear();
       answerStore.clear();
+      runtime.pending.clear();
     },
   };
+}
+
+function turnFailedNotice(): SemanticAnswer {
+  return systemAnswer(TURN_FAILED_MESSAGE, {
+    code: 'agent_error',
+    text: TURN_FAILED_MESSAGE,
+    locale: 'de',
+  });
 }
 
 /** Answer-link feature context — null when public_base_url is not configured. */
@@ -267,75 +313,116 @@ interface AnswerLinkContext {
   publicBaseUrl: string;
 }
 
+/** Seams a test (or a host) may replace; `activate(ctx, core)` needs none. */
+export interface ActivationDeps {
+  /** Decoration gate; defaults to the SDK registry. */
+  admitDecorations?: DecorationGate;
+  /** Timer seam for the pace behaviour (tests). */
+  paceClock?: PaceClock;
+}
+
+/** Everything a turn needs besides the turn itself. */
+interface TurnRuntime {
+  ctx: PluginContext;
+  /** Answers only on a host that publishes no channel resolver. */
+  defaultAgent: ChatAgent;
+  core: CoreApi;
+  client: SendblueClient;
+  state: ChannelState;
+  links: AnswerLinkContext | null;
+  speakerHistory: InMemorySpeakerHistoryStore;
+  pending: PendingChoices;
+  admit?: DecorationGate;
+  paceClock?: PaceClock;
+}
+
 /** Drive one orchestrator turn and ship the rendered answer back via Sendblue. */
-async function handleTurn(
-  ctx: PluginContext,
-  defaultAgent: ChatAgent,
-  core: CoreApi,
-  client: SendblueClient,
-  state: ChannelState,
-  turn: IncomingTurn,
-  links: AnswerLinkContext | null,
-): Promise<void> {
-  // US7 — most-specific key first: a binding on the sender's E.164 wins,
-  // then a binding on the line itself (the key the channel directory lists),
-  // then the platform fallback Agent. Without a published resolver the
+async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
+  const { ctx, core, client, state } = rt;
+  // US7 — most-specific key first: a binding on the sender's E.164, then a
+  // binding on the line itself (the key the channel directory lists). The
+  // sender's principal lets the kernel apply this user's own selection
+  // (`/agent <Name>`) ahead of a binding. Without a published resolver the
   // default agent answers.
+  const principal = principalFor(turn.userRef.id);
   const resolved = resolveAgentForTurn(
-    ctx,
+    ctx.services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE),
     CHANNEL_TYPE,
     [turn.conversationId, state.me?.fromNumber],
-    defaultAgent,
+    rt.defaultAgent,
+    principal ? { principal } : {},
   );
   if ('refused' in resolved) {
-    await refuseTurn(core, client, state, turn, resolved);
+    await refuseTurn(rt, turn, resolved);
     return;
   }
   const agent = resolved.agent;
 
-  // Fire-and-forget typing indicator (best-effort, never throws). The .catch
-  // covers a throw inside the log callback itself, which would otherwise
-  // surface as an unhandled rejection and take the process down under
-  // --unhandled-rejections=strict. Started only once an agent is known — a
-  // refused turn shows no "typing".
-  void client
-    .sendTypingIndicator(turn.conversationId)
-    .then((ok) => {
-      if (!ok) core.log('debug', 'iMessage typing indicator failed (ignored)');
-    })
-    .catch(() => {
-      /* best-effort: never let the indicator affect the turn */
-    });
-
+  const conversation = {
+    conversationKey: turn.conversationId,
+    speakerHistory: rt.speakerHistory,
+  };
   try {
-    const answer = await agent.chat({
-      userMessage: turn.text,
-      sessionScope: `imessage:${turn.conversationId}`,
-      userId: turn.userRef.id,
-      ...(turn.attachments && turn.attachments.length > 0
-        ? { attachments: turn.attachments }
-        : {}),
-    });
+    // Pace (spec 2042 §5.8): the typing indicator from the start, one
+    // acknowledgement when the work clearly outlasts a normal answer, no
+    // progress chatter. The Sendblue webhook is answered at once and the
+    // reply goes out through the API, so there is no reply window and a long
+    // turn needs no follow-up switch. Started only once an agent is known — a
+    // refused turn shows no "typing". Hook failures never fail the turn.
+    const { result: answer } = await runPacedTurn(
+      () =>
+        agent.chat({
+          userMessage: turn.text,
+          sessionScope: `imessage:${turn.conversationId}`,
+          userId: turn.userRef.id,
+          ...(turn.attachments && turn.attachments.length > 0
+            ? { attachments: turn.attachments }
+            : {}),
+        }),
+      DEFAULT_PACE_PROFILE,
+      {
+        sendTyping: async () => {
+          const ok = await client.sendTypingIndicator(turn.conversationId);
+          if (!ok) core.log('debug', 'iMessage typing indicator failed (ignored)');
+        },
+        // The acknowledgement is a notice of the channel: the resolved agent's
+        // identity is not known here, so it speaks as `system`.
+        sendAck: async (text) => {
+          await emitAnswer(client, turn.conversationId, systemAnswer(text), conversation);
+        },
+        onHookError: (hook, error) =>
+          core.log('debug', `iMessage pace hook failed (ignored): ${hook}`, {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+      },
+      { ...(rt.paceClock ? { clock: rt.paceClock } : {}) },
+    );
     if (isNoReply(answer)) {
       logNoReplyDrop(turn.channelId, { conversationId: turn.conversationId });
       return;
     }
     // Deep-link Phase 1: a choice card gets a capability URL so the user can
-    // pick in the app / browser instead of typing. Creating the entry
-    // supersedes any older open link of this conversation.
+    // pick in the app / browser instead of typing, but only where the
+    // decoration registry declares that affordance for this channel. Creating
+    // the entry supersedes any older open link of this conversation.
     let choiceLinkUrl: string | undefined;
-    if (links && answer.interactive?.kind === 'choice') {
-      const entry = links.store.create(turn.conversationId, answer.interactive);
-      choiceLinkUrl = `${links.publicBaseUrl}${ROUTE_PREFIX}/a/${entry.token}`;
+    if (rt.links && answer.interactive?.kind === 'choice' && isAnswerLinkAdmitted(rt.admit)) {
+      const entry = rt.links.store.create(turn.conversationId, answer.interactive);
+      choiceLinkUrl = `${rt.links.publicBaseUrl}${ROUTE_PREFIX}/a/${entry.token}`;
     }
-    const bubbles = renderAnswerBubbles(answer, choiceLinkUrl ? { choiceLinkUrl } : undefined);
-    if (bubbles.length === 0) return;
-    // Sequential on purpose: the bare-URL bubble (link preview card) has to
-    // land after the text. Sendblue accepts sends asynchronously, so awaiting
-    // the 2xx of the first is the best ordering guarantee available.
-    for (const content of bubbles) {
-      await client.sendMessage({ number: turn.conversationId, content });
-    }
+    await emitAnswer(
+      client,
+      turn.conversationId,
+      answer,
+      {
+        ...conversation,
+        ...(choiceLinkUrl ? { choiceLinkUrl } : {}),
+        ...(rt.admit ? { admit: rt.admit } : {}),
+      },
+      { onUnstamped: () => core.log('warn', 'iMessage answer arrived without a speaker') },
+    );
+    // The numbered question is now open: a bare number answers it.
+    rt.pending.record(turn.conversationId, answer.interactive);
     // A successful send clears a previously surfaced send error and takes the
     // channel back out of the error state.
     if (state.lastError) patchState(state, { lastError: null, status: 'connected' });
@@ -351,7 +438,7 @@ async function handleTurn(
     // red error banner. The next successful send clears both.
     patchState(state, { lastError: (err as Error).message, status: 'error' });
     try {
-      await client.sendMessage({ number: turn.conversationId, content: TURN_FAILED_MESSAGE });
+      await emitAnswer(client, turn.conversationId, turnFailedNotice(), conversation);
     } catch {
       /* original error already logged — don't mask it with a send failure */
     }
@@ -359,39 +446,43 @@ async function handleTurn(
 }
 
 /**
- * Answer a turn no Agent may handle (byte5ai/omadia#1598). The host refuses a
- * conversation its binding resolver rejects rather than letting another
- * orchestrator answer it; this channel says so in the chat instead of running
- * the turn into the default agent, whose refusal used to surface as a generic
- * "an error occurred, try again" bubble and a red channel status.
+ * Answer a turn no Agent may handle (byte5ai/omadia#1598, spec 2042 INV-7).
+ * The host refuses a conversation its binding resolver rejects rather than
+ * letting another orchestrator answer it; this channel says so in the chat, as
+ * a `system` notice, instead of running the turn into the default agent. When
+ * the kernel supplies the notice (it names the agent and the reason), that
+ * text is sent; otherwise the channel's own wording.
  *
  * The channel status is left alone on purpose: a missing binding is an
  * operator configuration gap, not a fault of this channel. Only a failing
  * send — the one thing that IS this channel's job here — is surfaced.
  */
-async function refuseTurn(
-  core: CoreApi,
-  client: SendblueClient,
-  state: ChannelState,
-  turn: IncomingTurn,
-  refusal: AgentRefusal,
-): Promise<void> {
-  if (refusal.refused === 'unassigned') {
-    core.log('warn', 'iMessage turn refused: no Agent is assigned to this conversation', {
-      conversationId: turn.conversationId,
-    });
-  } else {
+async function refuseTurn(rt: TurnRuntime, turn: IncomingTurn, refusal: AgentRefusal): Promise<void> {
+  const { core, client, state } = rt;
+  if (refusal.refused === 'resolver-failed') {
     core.log('error', 'iMessage turn refused: the channel resolver failed', {
       conversationId: turn.conversationId,
       error: refusal.error,
     });
+  } else {
+    core.log('warn', 'iMessage turn refused: no Agent serves this conversation', {
+      conversationId: turn.conversationId,
+      reason: refusal.refused,
+      ...(refusal.notice ? { notice: refusal.notice.code } : {}),
+    });
   }
+  // A resolver failure is transient, so "try again" is honest there; a
+  // conversation without an Agent stays without one until someone binds it.
+  const notice =
+    refusal.refused === 'resolver-failed'
+      ? turnFailedNotice()
+      : refusal.notice
+        ? systemAnswer(refusal.notice.text, refusal.notice)
+        : systemAnswer(NO_AGENT_MESSAGE, { code: 'no_agent', text: NO_AGENT_MESSAGE, locale: 'de' });
   try {
-    await client.sendMessage({
-      number: turn.conversationId,
-      // A resolver failure is transient, so "try again" is honest there; a
-      // conversation without an Agent stays without one until someone binds it.
-      content: refusal.refused === 'unassigned' ? NO_AGENT_MESSAGE : TURN_FAILED_MESSAGE,
+    await emitAnswer(client, turn.conversationId, notice, {
+      conversationKey: turn.conversationId,
+      speakerHistory: rt.speakerHistory,
     });
   } catch (err) {
     core.log('error', 'failed to send the iMessage refusal notice', {
@@ -415,68 +506,6 @@ function resolveChatAgent(ctx: PluginContext): ChatAgent | undefined {
     .getChatAgent;
   if (helper) return helper(ctx);
   return ctx.services.get<{ agent: ChatAgent }>('chatAgent')?.agent;
-}
-
-/**
- * Structural view of the kernel's `channelResolver@1` — the per-binding router
- * published by the multi-orchestrator runtime. Consumed directly (not via a
- * new SDK export) so this plugin keeps running on hosts whose
- * `@omadia/channel-sdk` predates the US7 helper; the service itself is what the
- * helper wraps.
- */
-interface ChannelBindingResolver {
-  resolve(
-    channelType: string,
-    channelKey: string,
-  ): { readonly decision: 'bound' | 'fallback' | 'reject'; readonly chatAgent?: ChatAgent };
-}
-
-const CHANNEL_RESOLVER_SERVICE = 'channelResolver';
-
-/**
- * Why a turn has no Agent. `unassigned`: the resolver rejected every key — no
- * binding and no platform fallback Agent. `resolver-failed`: the resolver
- * threw, so whether a binding exists is unknown.
- */
-type AgentRefusal =
-  | { readonly refused: 'unassigned' }
-  | { readonly refused: 'resolver-failed'; readonly error: string };
-
-/**
- * US7 per-turn Agent resolution. Routes a turn to the Agent the operator bound
- * to its `(channelType, channelKey)` via `channelResolver@1`. `channelKeys`
- * are tried most-specific first: a `bound` decision wins immediately, a
- * `fallback` (the platform fallback Agent) is remembered and used only if no
- * key is explicitly bound.
- *
- * `defaultAgent` answers only when the resolver is NOT published — a
- * single-Agent host, where it is the deployment's one orchestrator. With a
- * resolver, a turn nobody is bound to is refused (byte5ai/omadia#1598), and so
- * is a turn whose resolution threw: answering it from another orchestrator
- * would put an Agent in the conversation that the operator never assigned,
- * with that Agent's grants. Same rule as the SDK's
- * `resolveChatAgentForChannel`, kept local because it probes several keys.
- */
-function resolveAgentForTurn(
-  ctx: PluginContext,
-  channelType: string,
-  channelKeys: ReadonlyArray<string | null | undefined>,
-  defaultAgent: ChatAgent,
-): { readonly agent: ChatAgent } | AgentRefusal {
-  const resolver = ctx.services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE);
-  if (!resolver) return { agent: defaultAgent };
-  let fallback: ChatAgent | undefined;
-  try {
-    for (const key of channelKeys) {
-      if (!key) continue;
-      const decision = resolver.resolve(channelType, key);
-      if (decision.decision === 'bound' && decision.chatAgent) return { agent: decision.chatAgent };
-      if (decision.decision === 'fallback' && decision.chatAgent) fallback ??= decision.chatAgent;
-    }
-  } catch (err) {
-    return { refused: 'resolver-failed', error: err instanceof Error ? err.message : String(err) };
-  }
-  return fallback ? { agent: fallback } : { refused: 'unassigned' };
 }
 
 /** Parse the comma-separated allowlist into digits-only phone numbers. */

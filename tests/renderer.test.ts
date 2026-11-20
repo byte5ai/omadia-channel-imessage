@@ -1,9 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import type { SemanticAnswer } from '@omadia/channel-sdk';
+import { admitDecorations, type SemanticAnswer } from '@omadia/channel-sdk';
 
-import { mdToPlainText, renderAnswer, renderAnswerBubbles } from '../src/renderer.js';
+import { mdToPlainText, renderAnswer, renderAnswerBubbles, renderAnswerParts } from '../src/renderer.js';
 
 // Acceptance criterion (#410): headings, tables, bullets, links, code render
 // per spec with NO raw markdown leakage in the resulting iMessage text.
@@ -193,64 +193,62 @@ describe('mdToPlainText — GFM tables', () => {
 const answer = (over: Partial<SemanticAnswer>): SemanticAnswer =>
   ({ text: 'Hallo.', ...over }) as SemanticAnswer;
 
+/** A gate that declares the answer-link affordance for iMessage (the registry does not, yet). */
+const admitAll: typeof admitDecorations = (_channel, decorations) => ({
+  admitted: decorations,
+  refused: [],
+});
+
+const CHOICE = {
+  kind: 'choice' as const,
+  question: 'Welcher Slot?',
+  rationale: 'Beide sind frei.',
+  options: [
+    { label: 'Di 10:00', value: 'a' },
+    { label: 'Mi 14:30', value: 'b' },
+  ],
+};
+
 describe('renderAnswer — SemanticAnswer degradation', () => {
-  it('renders a choice card as an option list with the reply invitation', () => {
-    const out = renderAnswer(
-      answer({
-        interactive: {
-          kind: 'choice',
-          question: 'Welcher Slot?',
-          rationale: 'Beide sind frei.',
-          options: [
-            { label: 'Di 10:00', value: 'a' },
-            { label: 'Mi 14:30', value: 'b' },
-          ],
-        },
-      }),
-    );
+  it('renders a choice card as a numbered list, answerable by number', () => {
+    const out = renderAnswer(answer({ interactive: CHOICE }));
     assert.ok(out.includes('Welcher Slot?'));
-    assert.ok(out.includes('Beide sind frei.'));
-    assert.ok(out.includes('• Di 10:00'));
-    assert.ok(out.includes('• Mi 14:30'));
-    assert.ok(out.includes('Bitte antworte mit einer der Optionen.'));
+    assert.ok(out.includes('1) Di 10:00'));
+    assert.ok(out.includes('2) Mi 14:30'));
+    // No invitation line, no rationale: the list is the whole card.
+    assert.ok(!out.includes('Bitte antworte'));
+    assert.ok(!out.includes('Beide sind frei.'));
   });
 
-  it('appends the answer link when choiceLinkUrl is set', () => {
+  it('appends the answer link when the registry admits the affordance', () => {
     const url = 'https://omadia.example.com/api/imessage/a/tok123';
-    const out = renderAnswer(
-      answer({
-        interactive: {
-          kind: 'choice',
-          question: 'Welcher Slot?',
-          options: [{ label: 'Di', value: 'a' }],
-        },
-      }),
-      { choiceLinkUrl: url },
-    );
-    assert.ok(out.includes('oder wähle hier aus:'));
+    const out = renderAnswer(answer({ interactive: CHOICE }), { choiceLinkUrl: url, admit: admitAll });
+    assert.ok(out.includes('Oder wähle hier aus:'));
     assert.ok(out.includes(url));
-    assert.ok(!out.includes('Bitte antworte mit einer der Optionen.'));
+  });
+
+  it('drops the answer link while the registry does not declare it for iMessage', () => {
+    const url = 'https://omadia.example.com/api/imessage/a/tok123';
+    const parts = renderAnswerParts(answer({ interactive: CHOICE }), { choiceLinkUrl: url });
+    assert.equal(parts.bubbles.length, 1);
+    assert.ok(!parts.bubbles[0]!.includes('http'));
+    assert.deepEqual(parts.decorations, []);
   });
 
   it('splits a linked choice into a text bubble and a bare-URL bubble', () => {
     const url = 'https://omadia.example.com/api/imessage/a/tok123';
-    const bubbles = renderAnswerBubbles(
-      answer({
-        interactive: {
-          kind: 'choice',
-          question: 'Welcher Slot?',
-          options: [{ label: 'Di', value: 'a' }],
-        },
-      }),
-      { choiceLinkUrl: url },
-    );
-    assert.equal(bubbles.length, 2);
+    const parts = renderAnswerParts(answer({ interactive: CHOICE }), {
+      choiceLinkUrl: url,
+      admit: admitAll,
+    });
+    assert.equal(parts.bubbles.length, 2);
     // Text bubble is self-sufficient and carries no URL — the preview card
     // only renders when the URL is the whole message.
-    assert.ok(bubbles[0]!.includes('• Di'));
-    assert.ok(bubbles[0]!.includes('oder wähle hier aus:'));
-    assert.ok(!bubbles[0]!.includes('http'));
-    assert.equal(bubbles[1], url);
+    assert.ok(parts.bubbles[0]!.includes('1) Di 10:00'));
+    assert.ok(parts.bubbles[0]!.includes('Oder wähle hier aus:'));
+    assert.ok(!parts.bubbles[0]!.includes('http'));
+    assert.equal(parts.bubbles[1], url);
+    assert.deepEqual(parts.decorations, ['decision_card']);
   });
 
   it('yields a single bubble without a link, and none for an empty answer', () => {
@@ -260,25 +258,23 @@ describe('renderAnswer — SemanticAnswer degradation', () => {
       }),
     );
     assert.equal(one.length, 1);
-    assert.ok(one[0]!.includes('Bitte antworte mit einer der Optionen.'));
+    assert.ok(one[0]!.includes('1) A'));
     // choiceLinkUrl without a choice card is ignored — no stray URL bubble.
-    assert.deepEqual(renderAnswerBubbles(answer({ text: 'Nur Text.' }), { choiceLinkUrl: 'https://x' }), [
-      'Nur Text.',
-    ]);
+    assert.deepEqual(
+      renderAnswerBubbles(answer({ text: 'Nur Text.' }), { choiceLinkUrl: 'https://x', admit: admitAll }),
+      ['Nur Text.'],
+    );
     assert.deepEqual(renderAnswerBubbles(answer({ text: '   ' })), []);
   });
 
-  it('renders follow-ups (max 5) and the disclaimer', () => {
+  it('renders neither follow-ups nor a disclaimer line (not declared decorations)', () => {
     const out = renderAnswer(
       answer({
         followUps: Array.from({ length: 7 }, (_, i) => ({ prompt: `Frage ${i + 1}` })),
         disclaimer: 'Keine Rechtsberatung.',
       }),
     );
-    assert.ok(out.includes('💡 Du kannst auch fragen:'));
-    assert.ok(out.includes('• Frage 5'));
-    assert.ok(!out.includes('• Frage 6'));
-    assert.ok(out.endsWith('Keine Rechtsberatung.'));
+    assert.equal(out, 'Hallo.');
   });
 
   it('renders attachments as icon link lines', () => {
@@ -403,7 +399,7 @@ describe('mdToPlainText — links', () => {
 });
 
 describe('renderAnswerBubbles — degradation covers every field, not just text', () => {
-  it('strips markdown from the choice card, follow-ups, attachments and disclaimer', () => {
+  it('strips markdown from the choice card, contributions, attachments and system text', () => {
     const out = renderAnswer({
       text: 'Kurz **fett**.',
       interactive: {
@@ -415,22 +411,27 @@ describe('renderAnswerBubbles — degradation covers every field, not just text'
           { label: 'Option ~~B~~', value: 'b' },
         ],
       },
-      followUps: [{ prompt: 'Was kostet *Variante A*?' }],
+      contributions: [
+        {
+          id: 'c1',
+          speaker: { kind: 'agent', agentId: 'ag-mira', slug: 'mira', displayName: 'Mira' },
+          text: 'Das ist *wichtig*.',
+          status: 'delivered',
+        },
+      ],
       attachments: [{ kind: 'image', altText: '**Diagramm**', url: 'https://e.com/i.png' }],
-      disclaimer: '_Ohne Gewaehr_',
     } as unknown as SemanticAnswer);
 
-    for (const leak of ['**', '__', '~~', '](', '`']) {
+    for (const leak of ['**', '__', '~~', '](', '`', '*wichtig*']) {
       assert.ok(!out.includes(leak), `raw markdown leaked: ${leak}`);
     }
     assert.ok(out.includes('Welche Variante willst du?'));
-    assert.ok(out.includes('• Option A'));
-    assert.ok(out.includes('Was kostet Variante A?'));
+    assert.ok(out.includes('1) Option A'));
+    assert.ok(out.includes('Mira: Das ist wichtig.'));
     assert.ok(out.includes('Diagramm: https://e.com/i.png'));
-    assert.ok(out.includes('Ohne Gewaehr'));
   });
 
-  it('keeps a multi-line option label on one bullet line', () => {
+  it('keeps a multi-line option label on one list line', () => {
     const out = renderAnswer({
       text: '',
       interactive: {
@@ -439,6 +440,6 @@ describe('renderAnswerBubbles — degradation covers every field, not just text'
         options: [{ label: '# Titel\nZweite Zeile', value: 'a' }],
       },
     } as unknown as SemanticAnswer);
-    assert.ok(out.includes('• TITEL Zweite Zeile'), out);
+    assert.ok(out.includes('1) TITEL Zweite Zeile'), out);
   });
 });

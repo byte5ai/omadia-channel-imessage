@@ -4,10 +4,10 @@ import { describe, it } from 'node:test';
 
 import express, { type Router } from 'express';
 
-import type { ChannelKeyDirectory, SemanticAnswer } from '@omadia/channel-sdk';
+import type { ChannelKeyDirectory, PaceClock, SemanticAnswer } from '@omadia/channel-sdk';
 import type { PluginContext } from '@omadia/plugin-api';
 
-import { activate } from '../src/plugin.js';
+import { activate, type ActivationDeps } from '../src/plugin.js';
 
 /**
  * Mocked-webhook integration tests (triage plan for #410): a real express
@@ -59,9 +59,16 @@ interface Harness {
 /** Next scripted answer(s) the fake orchestrator returns (FIFO, repeats last). */
 let scriptedAnswers: SemanticAnswer[] = [{ text: 'Antwort vom Agenten.' }];
 
+/** The registry does not declare the answer link for iMessage yet; this gate does. */
+const ADMIT_ALL: ActivationDeps['admitDecorations'] = (_channel, decorations) => ({
+  admitted: decorations,
+  refused: [],
+});
+
 async function startHarness(
   config: Record<string, string> = {},
   extraServices: Record<string, unknown> = {},
+  deps: ActivationDeps = {},
 ): Promise<Harness> {
   const chatCalls: ChatCall[] = [];
   const sends: SendblueSend[] = [];
@@ -144,7 +151,7 @@ async function startHarness(
     },
   };
 
-  const handle = await activate(ctx, core as never);
+  const handle = await activate(ctx, core as never, deps);
 
   // The public router is the one registration that opts out of the host's
   // session gate. Pin the mount point rather than hand-typing it below: the
@@ -379,7 +386,7 @@ describe('plugin.activate — answer-link round trip', () => {
   } as SemanticAnswer;
 
   it('appends a capability URL, accepts the pick, and drives the follow-up turn', async () => {
-    const h = await startHarness({ public_base_url: 'https://omadia.example.com' });
+    const h = await startHarness({ public_base_url: 'https://omadia.example.com' }, {}, { admitDecorations: ADMIT_ALL });
     try {
       scriptedAnswers = [CHOICE_ANSWER, { text: 'Di ist gebucht.' }];
 
@@ -389,7 +396,7 @@ describe('plugin.activate — answer-link round trip', () => {
       // Two bubbles, in order: the self-sufficient text (no URL inside), then
       // the bare URL so iMessage can unfurl it into a preview card.
       const text = String(h.sends[0]?.body.content);
-      assert.ok(text.includes('• Di 10:00'), `text bubble must list the options, got:\n${text}`);
+      assert.ok(text.includes('1) Di 10:00'), `text bubble must list the options, got:\n${text}`);
       assert.ok(!text.includes('http'), 'text bubble must not embed the URL');
       const link = String(h.sends[1]?.body.content);
       const match = /^https:\/\/omadia\.example\.com\/api\/imessage\/a\/([A-Za-z0-9_-]+)$/.exec(link);
@@ -427,7 +434,7 @@ describe('plugin.activate — answer-link round trip', () => {
   });
 
   it('invalidates a pending link when the user replies by text instead', async () => {
-    const h = await startHarness({ public_base_url: 'https://omadia.example.com' });
+    const h = await startHarness({ public_base_url: 'https://omadia.example.com' }, {}, { admitDecorations: ADMIT_ALL });
     try {
       scriptedAnswers = [CHOICE_ANSWER, { text: 'Ok!' }];
 
@@ -450,15 +457,47 @@ describe('plugin.activate — answer-link round trip', () => {
     }
   });
 
-  it('degrades to the plain text list when public_base_url is not configured', async () => {
+  it('degrades to the numbered text list when public_base_url is not configured', async () => {
     const h = await startHarness();
     try {
       scriptedAnswers = [CHOICE_ANSWER];
       await postWebhook(h.base, SECRET, inbound({ content: 'Buche einen Slot' }));
       await waitFor(() => h.sends.length === 1, 'choice bubble');
       const bubble = String(h.sends[0]?.body.content);
-      assert.ok(bubble.includes('Bitte antworte mit einer der Optionen.'));
+      assert.ok(bubble.includes('2) Mi 14:30'));
       assert.ok(!bubble.includes('/api/imessage/a/'), 'no link without public_base_url');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sends no answer link while the registry does not declare it for iMessage', async () => {
+    const h = await startHarness({ public_base_url: 'https://omadia.example.com' });
+    try {
+      scriptedAnswers = [CHOICE_ANSWER];
+      await postWebhook(h.base, SECRET, inbound({ content: 'Buche einen Slot' }));
+      await waitFor(() => h.sends.length === 1, 'choice bubble');
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(h.sends.length, 1, 'no URL bubble');
+      assert.ok(!String(h.sends[0]?.body.content).includes('http'));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('turns a bare number into the option it names, once', async () => {
+    const h = await startHarness();
+    try {
+      scriptedAnswers = [CHOICE_ANSWER, { text: 'Mi ist gebucht.' }, { text: 'Ok.' }];
+      await postWebhook(h.base, SECRET, inbound({ content: 'Buche einen Slot' }));
+      await waitFor(() => h.sends.length === 1, 'choice bubble');
+      await postWebhook(h.base, SECRET, inbound({ content: '2' }));
+      await waitFor(() => h.sends.length === 2, 'answer to the pick');
+      assert.equal(h.chatCalls[1]?.userMessage, 'slot-mi');
+      // The question is consumed: a later "2" is just text again.
+      await postWebhook(h.base, SECRET, inbound({ content: '2' }));
+      await waitFor(() => h.sends.length === 3, 'plain turn');
+      assert.equal(h.chatCalls[2]?.userMessage, '2');
     } finally {
       await h.close();
     }
@@ -640,3 +679,249 @@ describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
     }
   });
 });
+
+describe('plugin.activate — agents as colleagues (spec 2042)', () => {
+  const MIRA = { kind: 'agent', agentId: 'ag-mira', slug: 'mira', displayName: 'Mira' } as const;
+  const BEN = { kind: 'agent', agentId: 'ag-ben', slug: 'ben', displayName: 'Ben' } as const;
+
+  const agentReturning = (answer: SemanticAnswer) => ({
+    chat: async (): Promise<SemanticAnswer> => answer,
+  });
+
+  const bubbles = (h: Harness): string[] => h.sends.map((s) => String(s.body.content));
+
+  it('forwards "/agent Mira" verbatim as ordinary text and renders the kernel notice as plain system text', async () => {
+    const seen: string[] = [];
+    const notice = {
+      text: 'Du sprichst jetzt mit Mira.',
+      speaker: { kind: 'system' },
+      systemNotice: { code: 'agent_selected', text: 'Du sprichst jetzt mit Mira.', locale: 'de' },
+    } as unknown as SemanticAnswer;
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'bound',
+            chatAgent: {
+              chat: async (input: { userMessage: string }) => {
+                seen.push(input.userMessage);
+                return notice;
+              },
+            },
+          }),
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound({ content: '/agent Mira' }));
+      await waitFor(() => h.sends.length === 1, 'selection notice');
+      assert.deepEqual(seen, ['/agent Mira'], 'no channel-side parsing of /agent');
+      assert.deepEqual(bubbles(h), ['Du sprichst jetzt mit Mira.']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('passes the sender principal to the resolver so the kernel can apply the selection', async () => {
+    const contexts: unknown[] = [];
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: (_t: string, _k: string, context?: unknown) => {
+            contexts.push(context);
+            return { decision: 'bound', chatAgent: agentReturning({ text: 'ok' } as SemanticAnswer) };
+          },
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'answer');
+      assert.deepEqual(contexts, [{ principal: `user:${SENDER}` }]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sends the kernel notice of an unavailable agent and does not hand the turn to the line agent', async () => {
+    const lineCalls: string[] = [];
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: (_t: string, key: string) =>
+            key === SENDER
+              ? {
+                  decision: 'reject',
+                  notice: {
+                    code: 'agent_disabled',
+                    text: 'Mira ist zurzeit deaktiviert.',
+                    locale: 'de',
+                    agent: { slug: 'mira', displayName: 'Mira' },
+                  },
+                }
+              : { decision: 'bound', chatAgent: recordingAgentFor(lineCalls) },
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'notice');
+      assert.deepEqual(bubbles(h), ['Mira ist zurzeit deaktiviert.']);
+      assert.deepEqual(lineCalls, []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  function recordingAgentFor(calls: string[]) {
+    return {
+      chat: async (input: { userMessage: string }): Promise<SemanticAnswer> => {
+        calls.push(input.userMessage);
+        return { text: 'von der Leitung' } as SemanticAnswer;
+      },
+    };
+  }
+
+  it('shows no name line for one agent, a name line once a second agent speaks', async () => {
+    let agent: typeof MIRA | typeof BEN = MIRA;
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'bound',
+            chatAgent: {
+              chat: async (): Promise<SemanticAnswer> =>
+                ({ text: 'Antwort.', speaker: agent }) as SemanticAnswer,
+            },
+          }),
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'first answer');
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 2, 'second answer');
+      assert.deepEqual(bubbles(h), ['Antwort.', 'Antwort.'], 'one agent: no name line, ever');
+      agent = BEN;
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 3, 'third answer');
+      assert.equal(bubbles(h)[2], 'Ben: Antwort.', 'the speaker changed: a name line');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('attributes a colleague contribution in plain text', async () => {
+    scriptedAnswers = [
+      {
+        text: 'Ich habe Mira gefragt.',
+        speaker: BEN,
+        contributions: [{ id: 'c1', speaker: MIRA, text: 'Das passt.', status: 'delivered' }],
+      } as unknown as SemanticAnswer,
+    ];
+    const h = await startHarness();
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'answer');
+      assert.deepEqual(bubbles(h), ['Ich habe Mira gefragt.\n\nMira: Das passt.']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('acknowledges long work exactly once and then answers (pace)', async () => {
+    const clock = manualClock();
+    let release: (a: SemanticAnswer) => void = () => undefined;
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'bound',
+            chatAgent: {
+              chat: () => new Promise<SemanticAnswer>((r) => (release = r)),
+            },
+          }),
+        },
+      },
+      { paceClock: clock.clock },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => clock.pending() > 0, 'pace timer armed');
+      await clock.advance(7_999);
+      assert.equal(h.sends.length, 0, 'no acknowledgement before the threshold');
+      await clock.advance(2);
+      await waitFor(() => h.sends.length === 1, 'acknowledgement');
+      await clock.advance(120_000);
+      assert.equal(h.sends.length, 1, 'one acknowledgement, no progress chatter');
+      assert.equal(bubbles(h)[0], 'Ich kümmere mich darum, das dauert einen Moment.');
+      release({ text: 'Fertig.', speaker: MIRA } as unknown as SemanticAnswer);
+      await waitFor(() => h.sends.length === 2, 'the answer');
+      assert.equal(bubbles(h)[1], 'Fertig.');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sends no acknowledgement for a fast answer (pace)', async () => {
+    const clock = manualClock();
+    const h = await startHarness({}, {}, { paceClock: clock.clock });
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'answer');
+      await clock.advance(60_000);
+      assert.equal(h.sends.length, 1);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+/** A manual clock: timers fire only when the test advances time. */
+function manualClock() {
+  let now = 0;
+  const timers: { at: number; fn: () => void; every?: number; id: number; done?: boolean }[] = [];
+  let nextId = 1;
+  const clock: PaceClock = {
+    now: () => now,
+    setTimeout: (fn, ms) => {
+      const t = { at: now + ms, fn, id: nextId++ };
+      timers.push(t);
+      return t.id;
+    },
+    clearTimeout: (h) => {
+      const t = timers.find((x) => x.id === h);
+      if (t) t.done = true;
+    },
+    setInterval: (fn, ms) => {
+      const t = { at: now + ms, fn, every: ms, id: nextId++ };
+      timers.push(t);
+      return t.id;
+    },
+    clearInterval: (h) => {
+      const t = timers.find((x) => x.id === h);
+      if (t) t.done = true;
+    },
+  };
+  const advance = async (ms: number): Promise<void> => {
+    const target = now + ms;
+    for (;;) {
+      const due = timers.filter((t) => !t.done && t.at <= target).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      now = due.at;
+      if (due.every !== undefined) due.at += due.every;
+      else due.done = true;
+      due.fn();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    now = target;
+    await new Promise((r) => setTimeout(r, 0));
+  };
+  return { clock, advance, pending: () => timers.filter((t) => !t.done).length };
+}
