@@ -71,11 +71,13 @@ It needs an LLM provider assigned to the orchestrator first.
 
 > **Inactive until omadia declares it.** Since 0.4.0 every element the channel
 > adds around an answer must be declared in omadia's decoration registry. The
-> choice affordance is declared for Teams and the web chat only, so for iMessage
-> the link is **not sent** for now; a choice card arrives as a numbered list
-> and a reply like `2` answers it. The routes and the code below stay in place
-> and the link returns on its own once the registry declares the affordance for
-> `imessage`.
+> registry entry `decision_card` (the choice affordance) lists `teams` and `web`
+> as channels, not `imessage`, so the link is **not sent** for now; a choice card
+> arrives as a numbered list and a reply like `2` answers it. What is missing is
+> that one entry in the kernel's `decorations.ts` (its channel list, with the
+> written justification: a link tap versus typing a digit). The routes and the
+> code below stay in place and the link returns on its own once the registry
+> declares it for `imessage`.
 
 iMessage cannot render choice buttons. With `public_base_url` set and the
 affordance declared, an answer carrying an interactive choice card additionally
@@ -163,11 +165,21 @@ Instead the user picks the agent by text, in the 1:1 chat:
 ```
 
 iMessage has no native bot commands, so the plugin does **not** parse these: the
-message goes to omadia unchanged, omadia's management layer stores the user's
-selection and answers with a short system notice. Only agents available to that
-user in iMessage can be selected. The sender's number is passed as the user so
-that two people texting the same line each keep their own agent, also after a
-restart (the selection lives in omadia, not in this plugin).
+message goes to omadia unchanged, the ChatAgent omadia's channel resolver returns
+carries out the command (it stores the user's selection, or lists the agents) and
+answers with a short system notice. An empty `/agent` clears the selection; the
+list is `/agents`. This also works for a sender no agent serves yet (the resolver
+rejects the turn, and its ChatAgent still answers the command). Only agents
+available to that user in iMessage can be selected.
+
+The sender is identified by the SDK principal `user:custom:<number>` (for example
+`user:custom:+491701234567`), the one form every channel uses, so two people
+texting the same line each keep their own agent, also after a restart (the
+selection lives in omadia, not in this plugin). The kind is `custom`, the slot
+the channel SDK offers for channels outside its closed list, because the turn's
+`userRef` must use it and omadia derives the same principal from it elsewhere.
+No e-mail address is attached: Sendblue states a phone number, never a verified
+e-mail.
 
 ### What an answer looks like
 
@@ -188,8 +200,15 @@ Plain text, as a colleague would write it:
 
 For long work the agent shows the typing indicator, says once that it is on it
 ("Ich kümmere mich darum, das dauert einen Moment.") after about 8 seconds, and
-answers when done. That acknowledgement is sent as a system message because the
-channel does not know the resolved agent's identity at that point.
+answers when done. The acknowledgement goes out under the agent that was resolved
+for the turn (the resolver names it before the answer), in the agent's words,
+with the usual name line only where INV-4 asks for one. On a host without a
+channel resolver no agent is known beforehand and no acknowledgement is sent
+(the typing indicator stays).
+
+An answer that carries no speaker, and for which the resolver named none, is
+**withheld**: the sender gets a short system notice that something went wrong, the
+operator log gets an error. A path that cannot name its speaker cannot emit.
 
 ### Groups
 
@@ -202,15 +221,55 @@ agent is present in a group and no roster provider is needed. Agents work in
 The plugin contributes its configured line to the operator channels dashboard
 (`GET /api/v1/operator/channels`), so the line is a pickable binding key.
 Per turn the plugin asks omadia's channel resolver with the sender's number
-first and the line second, and passes the sender as the user. A user's own
-selection (`/agent`) outranks a binding. Of the bindings, the one on the
-**sender E.164** wins over the one on the **line**; a default-agent entry only
-applies when no binding does. If the agent that was addressed or bound may not
-serve the conversation (disabled, deleted, not available to the sender), the
-sender gets omadia's system notice naming it, and no other agent answers in its
-place. If nothing addresses an agent at all, the sender is told that no Agent is
-assigned to the conversation and no orchestrator runs. On a host without the
-multi-Agent registry, its single orchestrator answers every conversation.
+first and the line second, and passes the sender's principal. The resolver
+answers `bound` or `reject`; there is no fallback agent. The first key that
+binds decides. A user's own selection (`/agent`), a binding and the
+default-agent table are applied by the resolver within one key. If the agent
+that was addressed or bound may not serve the conversation (disabled, deleted,
+not available to the sender), the sender gets omadia's system notice naming it,
+and no other agent answers in its place: that reject ends the search. If nothing
+addresses an agent at all, the sender is told that no Agent is assigned (the
+line key is still tried before). On a reject no agent runs; only a `system`
+message goes out, never an agent's words. On a host without the multi-Agent
+registry, its single orchestrator answers every conversation.
+
+Because the sender's key is asked first and a `bound` answer is final, a
+default-agent entry that names an agent for the sender key hides a binding that
+is set on the line only. Bind the line only when the default table is `off` for
+this channel, or bind the sender numbers (see the open questions of the PR).
+
+## Polls and question cards (plain text)
+
+A facilitation or a Conductor step can post a poll or a question card into an
+iMessage conversation (the channel registers TargetedSend and ConversationSend
+providers). iMessage cannot render a card, so it goes out as text and is
+answered in text:
+
+```
+Wann treffen wir uns?
+
+Antworte mit der Nummer.
+1) Di 10:00
+2) Mi 14:30
+```
+
+A reply is parsed deterministically (no model) into the typed answer a card
+click would carry and handed to omadia as a `card_answer` message (a poll as
+`{ optionId }`, a card with its typed `answers`, `proposalId` and
+`proposalVersion`). A reply that does not fit is asked again once; a second miss
+releases the question and the text goes on as an ordinary message. A message that
+starts with `/` (`/agent`, `/agents`) never answers a question. An answer is
+final (a posted bubble cannot be updated); an unanswered question expires with
+its `closesAt`, else after 24 hours; a restart forgets it.
+
+What the providers declare: polls, and question cards with **one** question of
+kind single choice, multiple choice, ranking, consent, text, number or date (a
+typed reply cannot say which of several questions it answers, and an assignment
+needs a member roster). They do **not** declare sending "as an agent's own
+identity" (all agents share the Sendblue line, so omadia refuses such a send),
+mentions or an AI label. A principal is addressed as `user:custom:<number>`;
+numbers outside the `allowlist` are refused as not permitted. Attachments go out
+as link lines (no outbound media).
 
 ## Privacy & data transit
 

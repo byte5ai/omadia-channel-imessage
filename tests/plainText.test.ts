@@ -93,6 +93,23 @@ describe('decoration registry (criterion 31)', () => {
     assert.deepEqual(refused, []);
   });
 
+  it('the answer link is inactive: decision_card is declared for Teams and web, not for imessage', () => {
+    const { admitted, refused } = admitDecorations(CHANNEL_TYPE, [{ id: 'decision_card' }]);
+    assert.deepEqual(admitted, []);
+    assert.deepEqual(refused, [{ id: 'decision_card', reason: 'channel_not_declared' }]);
+    // The plain-text path needs no decoration: a choice is a numbered list and
+    // a poll or question card is renderCardAsText (neither is a decoration).
+    const answer = {
+      text: 'Q',
+      speaker: MIRA,
+      interactive: { kind: 'choice', question: 'Q?', options: [{ label: 'A', value: 'a' }] },
+    } as unknown as SemanticAnswer;
+    const parts = renderAnswerParts(answer, { choiceLinkUrl: 'https://x/a/t' });
+    assert.deepEqual(parts.decorations, []);
+    assert.equal(parts.bubbles.length, 1);
+    assert.ok(parts.bubbles[0]?.includes('1) A'));
+  });
+
   it('fails when the registry grows an entry for this channel the plugin has not reviewed', () => {
     const reviewed = new Set(['ai_disclosure_line']);
     const forImessage = DECORATION_REGISTRY.filter(

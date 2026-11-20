@@ -116,11 +116,14 @@ die API sie erreichen darf.
 
 > **Inaktiv, bis omadia es deklariert.** Seit 0.4.0 muss jedes Element, das der
 > Channel um eine Antwort legt, in omadias Dekorations-Registry deklariert sein.
-> Die Auswahl-Affordance ist nur für Teams und den Web-Chat deklariert, also
-> wird der Link für iMessage vorerst **nicht gesendet**; eine Auswahlkarte
-> kommt als nummerierte Liste an, und eine Antwort wie `2` beantwortet sie.
-> Routen und Code unten bleiben bestehen; der Link kehrt von selbst zurück,
-> sobald die Registry die Affordance für `imessage` deklariert.
+> Der Registry-Eintrag `decision_card` (die Auswahl-Affordance) listet `teams`
+> und `web` als Channels, nicht `imessage`; der Link wird daher vorerst **nicht
+> gesendet**, eine Auswahlkarte kommt als nummerierte Liste an, und eine Antwort
+> wie `2` beantwortet sie. Es fehlt genau dieser eine Eintrag in `decorations.ts`
+> des Kernels (seine Channel-Liste, mit der schriftlichen Begründung: ein
+> Link-Tipp gegenüber dem Tippen einer Ziffer). Routen und Code unten bleiben
+> bestehen; der Link kehrt von selbst zurück, sobald die Registry ihn für
+> `imessage` deklariert.
 
 iMessage kann keine Auswahl-Buttons darstellen. Ist `public_base_url` gesetzt
 und die Affordance deklariert, enthält eine Antwort mit interaktiver
@@ -213,12 +216,22 @@ Stattdessen wählt der Nutzer den Agenten per Text, im 1:1-Chat:
 ```
 
 iMessage hat keine nativen Bot-Commands, das Plugin parst diese Eingaben daher
-**nicht**: Die Nachricht geht unverändert an omadia, die Management-Schicht
-speichert die Auswahl des Nutzers und antwortet mit einer kurzen System-Notiz.
-Wählbar sind nur Agenten, die diesem Nutzer in iMessage zur Verfügung stehen.
-Die Absender-Nummer wird als Nutzer mitgegeben, sodass zwei Personen, die
-dieselbe Line anschreiben, je ihren Agenten behalten, auch nach einem Neustart
-(die Auswahl liegt in omadia, nicht in diesem Plugin).
+**nicht**: Die Nachricht geht unverändert an omadia, der ChatAgent, den omadias
+Channel-Resolver liefert, führt den Befehl aus (er speichert die Auswahl des
+Nutzers oder listet die Agenten) und antwortet mit einer kurzen System-Notiz.
+Ein leeres `/agent` löscht die Auswahl; die Liste zeigt `/agents`. Das gilt auch
+für einen Absender, den noch kein Agent bedient (der Resolver weist den Turn ab,
+sein ChatAgent beantwortet den Befehl trotzdem). Wählbar sind nur Agenten, die
+diesem Nutzer in iMessage zur Verfügung stehen.
+
+Der Absender wird über den SDK-Principal `user:custom:<Nummer>` identifiziert
+(z. B. `user:custom:+491701234567`), die eine Form, die jeder Channel nutzt;
+zwei Personen, die dieselbe Line anschreiben, behalten so je ihren Agenten, auch
+nach einem Neustart (die Auswahl liegt in omadia, nicht in diesem Plugin). Die
+Art ist `custom`, der Platz, den das Channel-SDK für Channels außerhalb seiner
+geschlossenen Liste bietet, weil der `userRef` des Turns sie nutzen muss und
+omadia daraus anderswo denselben Principal ableitet. Es hängt keine E-Mail-Adresse
+dran: Sendblue nennt eine Telefonnummer, nie eine verifizierte E-Mail.
 
 ### Wie eine Antwort aussieht
 
@@ -242,9 +255,16 @@ Klartext, so wie ein Kollege schreibt:
 
 Bei längerer Arbeit zeigt der Agent den Tippindikator, sagt nach etwa 8
 Sekunden einmal, dass er dran ist („Ich kümmere mich darum, das dauert einen
-Moment.“), und antwortet, wenn er fertig ist. Diese Bestätigung geht als
-System-Nachricht raus, weil der Channel die Identität des aufgelösten Agenten
-an dieser Stelle nicht kennt.
+Moment.“), und antwortet, wenn er fertig ist. Die Bestätigung geht unter dem
+Agenten raus, der für den Turn aufgelöst wurde (der Resolver nennt ihn vor der
+Antwort), in den Worten des Agenten, mit der üblichen Namenszeile nur, wo INV-4
+eine verlangt. Auf einem Host ohne Channel-Resolver ist vorab kein Agent bekannt
+und es geht keine Bestätigung raus (der Tippindikator bleibt).
+
+Eine Antwort ohne Sprecher, zu der auch der Resolver keinen genannt hat, wird
+**zurückgehalten**: Der Absender erhält eine kurze System-Notiz, dass etwas schief
+ging, das Betreiber-Log einen Fehler. Ein Pfad, der seinen Sprecher nicht nennen
+kann, darf nicht senden.
 
 ### Gruppen
 
@@ -257,17 +277,59 @@ keinen Roster-Provider. Agenten arbeiten nur in 1:1-Chats.
 Das Plugin trägt die konfigurierte Line ins Operator-Channels-Dashboard ein
 (`GET /api/v1/operator/channels`) — die Line ist damit ein auswählbarer
 Binding-Key. Pro Turn fragt das Plugin omadias Channel-Resolver zuerst mit der
-Absender-Nummer, dann mit der Line und gibt den Absender als Nutzer mit. Die
-eigene Auswahl eines Nutzers (`/agent`) geht einem Binding vor. Von den Bindings
-gewinnt das auf die **Absender-Nummer** (E.164) gegen das auf die **Line**; ein
-Default-Agent-Eintrag gilt nur, wenn kein Binding greift. Darf der angesprochene
-oder gebundene Agent die Unterhaltung nicht bedienen (deaktiviert, gelöscht,
-für den Absender nicht verfügbar), erhält der Absender omadias System-Notiz mit
-dem Namen des Agenten, und kein anderer Agent antwortet an seiner Stelle.
-Spricht gar nichts einen Agenten an, erfährt der Absender, dass der
-Unterhaltung kein Agent zugewiesen ist, und es läuft kein Orchestrator. Auf
-einem Host ohne Multi-Agent-Registry beantwortet dessen einziger Orchestrator
-jede Unterhaltung.
+Absender-Nummer, dann mit der Line und gibt den Principal des Absenders mit.
+Der Resolver antwortet `bound` oder `reject`; es gibt keinen Fallback-Agenten.
+Der erste Key, der bindet, entscheidet. Die eigene Auswahl eines Nutzers
+(`/agent`), ein Binding und die Default-Agent-Tabelle wendet der Resolver je Key
+an. Darf der angesprochene oder gebundene Agent die Unterhaltung nicht bedienen
+(deaktiviert, gelöscht, für den Absender nicht verfügbar), erhält der Absender
+omadias System-Notiz mit dem Namen des Agenten, und kein anderer Agent antwortet
+an seiner Stelle: Dieses Reject beendet die Suche. Spricht gar nichts einen
+Agenten an, erfährt der Absender, dass kein Agent zugewiesen ist (vorher wird
+noch der Line-Key versucht). Bei einem Reject läuft kein Agent; es geht nur eine
+`system`-Nachricht raus, nie Worte eines Agenten. Auf einem Host ohne
+Multi-Agent-Registry beantwortet dessen einziger Orchestrator jede Unterhaltung.
+
+Weil der Key des Absenders zuerst gefragt wird und ein `bound` endgültig ist,
+verdeckt ein Default-Agent-Eintrag, der für den Absender-Key einen Agenten nennt,
+ein Binding, das nur auf der Line sitzt. Die Line nur binden, wenn die
+Default-Tabelle für diesen Channel `off` ist, oder die Absender-Nummern binden
+(siehe offene Fragen im PR).
+
+## Umfragen und Fragekarten (Klartext)
+
+Eine Moderation oder ein Conductor-Schritt kann eine Umfrage oder eine Fragekarte
+in eine iMessage-Unterhaltung posten (der Channel registriert TargetedSend- und
+ConversationSend-Provider). iMessage kann keine Karte darstellen, sie geht daher
+als Text raus und wird als Text beantwortet:
+
+```
+Wann treffen wir uns?
+
+Antworte mit der Nummer.
+1) Di 10:00
+2) Mi 14:30
+```
+
+Eine Antwort wird deterministisch geparst (kein Modell) und als die typisierte
+Antwort, die ein Klick auf die Karte trüge, als `card_answer`-Nachricht an omadia
+übergeben (eine Umfrage als `{ optionId }`, eine Karte mit ihren typisierten
+`answers`, `proposalId` und `proposalVersion`). Passt eine Antwort nicht, wird
+einmal nachgefragt; der zweite Fehlgriff gibt die Frage frei, und der Text läuft
+als gewöhnliche Nachricht weiter. Eine Nachricht, die mit `/` beginnt (`/agent`,
+`/agents`), beantwortet nie eine Frage. Eine Antwort gilt endgültig (eine
+gesendete Blase lässt sich nicht aktualisieren); eine unbeantwortete Frage
+verfällt mit ihrem `closesAt`, sonst nach 24 Stunden; ein Neustart vergisst sie.
+
+Was die Provider deklarieren: Umfragen und Fragekarten mit **einer** Frage der
+Art Einzelauswahl, Mehrfachauswahl, Rangfolge, Zustimmung, Text, Zahl oder Datum
+(eine getippte Antwort kann bei mehreren Fragen nicht sagen, welche sie
+beantwortet; eine Zuweisung braucht ein Mitglieder-Roster). Sie deklarieren
+**nicht** das Senden „als eigene Identität eines Agenten“ (alle Agenten teilen
+die Sendblue-Line, omadia lehnt so ein Senden ab), Erwähnungen und ein KI-Label.
+Ein Principal wird als `user:custom:<Nummer>` angesprochen; Nummern außerhalb der
+`allowlist` werden als nicht erlaubt abgelehnt. Anhänge gehen als Linkzeilen raus
+(keine ausgehenden Medien).
 
 ## Datenschutz & Datentransit
 

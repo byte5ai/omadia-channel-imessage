@@ -24,16 +24,43 @@ kernel runs on the target instance.**
 - **One emitter.** Every message, an agent's answer or a notice of the channel,
   carries its speaker (`system` for the channel's own notices) and leaves through
   `src/emit.ts`; a test counts the `sendMessage` call sites.
-- **Agent selection.** The sender's number is passed to the channel resolver as
-  the user principal so the kernel can apply the user's `/agent <Name>` selection
-  ahead of a binding. `/agent ...` is sent to omadia unchanged (no parser in the
-  plugin; iMessage has no native commands) and the kernel's notice is shown.
-  Resolution ranks selection, then sender binding, then line binding, then the
-  default-agent entry; an unavailable agent is named in the kernel's system
-  notice and never replaced by another agent (INV-7).
+- **Agent selection.** The sender's principal is passed to the channel resolver
+  so the kernel can apply the user's `/agent <Name>` selection ahead of a binding.
+  `/agent ...` is sent to omadia unchanged (no parser in the plugin; iMessage has
+  no native commands) and the kernel's notice is shown. An unavailable agent is
+  named in the kernel's system notice and never replaced by another agent
+  (INV-7). See "Resolver contract" below for the final rules.
 - **Pace.** The agent call runs through `runPacedTurn`: typing indicator, one
-  acknowledgement after about 8 s, no progress chatter. There is no reply window
+  acknowledgement after about 8 s (under the agent's speaker, see below), no
+  progress chatter. There is no reply window
   (the webhook is answered at once).
+- **Resolver contract (omadia#2055, S1).** The channel resolver answers `bound` or
+  `reject` (no `fallback`, no `match`). The first key (sender, then line) that
+  binds decides; a reject that names an agent ends the search (INV-7). On a
+  reject the text still goes to the resolver's ChatAgent (it carries out
+  `/agent`, `/agent` empty = clear, `/agents` = list) and only its `system`
+  answer is sent; an agent-voiced answer on a reject is withheld. Without a
+  ChatAgent or notice the channel's own "no agent assigned" text goes out as
+  `system`. No `agentSelection` use, no `parseAgentCommand`, no extra
+  `optional_requires`.
+- **Principal** is `channelUserPrincipal({ kind: 'custom', id: <number> })`,
+  `user:custom:+49…` (was `user:<number>`). `custom` because `ChannelUserKind`
+  has no iMessage member and the turn's `userRef` must use one; the kernel derives
+  the same principal from it. No e-mail: Sendblue does not verify one.
+- **Speaker up front.** The pace acknowledgement is sent under the agent the
+  resolver named before the answer (`ChannelResolveResult.speaker`), not as
+  `system`. An answer without a speaker takes the resolver's speaker; with
+  neither it is **withheld** and the sender gets a `system` notice (fail-closed;
+  the old "warn and send anyway" is gone). Without a resolver no speaker is known
+  beforehand and no acknowledgement is sent.
+- **Send providers (criterion 30).** `TargetedSend` and `ConversationSend`
+  providers: text, polls and single-question cards as numbered text
+  (`renderCardAsText`), replies parsed with `parseCardReply` and forwarded as
+  typed `card_answer` conversation messages (`emitConversationMessage`). Declared:
+  `poll`, `card` (7 kinds, 1 question, no update). Not declared: `asChannelKey`,
+  `mentions`, `aiLabel`. Numbers outside the allowlist are `not_permitted`.
+- **compat.core** is the placeholder `>=1.74.0 <2.0` (the parent session sets the
+  final floor and the version when the kernel lands).
 - README (EN, DE): per-agent identity is **not supported** (one Sendblue line
   per installation; what multiple lines would take and why it is not built),
   `/agent` selection, what an answer looks like, groups unsupported.
