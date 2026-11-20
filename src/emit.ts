@@ -1,7 +1,7 @@
-import type { SemanticAnswer, Speaker, SystemNotice } from '@omadia/channel-sdk';
+import type { AgentSpeaker, SemanticAnswer, Speaker, SystemNotice } from '@omadia/channel-sdk';
 
 import { renderAnswerParts, type RenderOptions } from './renderer.js';
-import type { SendblueClient } from './sendblueClient.js';
+import type { SendblueClient, SendMessageResult } from './sendblueClient.js';
 
 /**
  * The one emitter of this channel (spec 2042 criterion 5). Every user-visible
@@ -15,9 +15,22 @@ import type { SendblueClient } from './sendblueClient.js';
 // keeps plugin-api type-only, so the literal is spelled out here).
 const SYSTEM: Speaker = Object.freeze({ kind: 'system' });
 
+/**
+ * An answer that reached the emitter without a speaker. It is NOT sent: a path
+ * that cannot name its speaker cannot emit (spec 2042 §5.5), and guessing one
+ * would put words under a name nobody chose. The caller answers with a
+ * `system` notice instead (fail-closed).
+ */
+export class MissingSpeakerError extends Error {
+  constructor() {
+    super('iMessage answer has no speaker and none was resolved before the turn');
+    this.name = 'MissingSpeakerError';
+  }
+}
+
 export interface EmitHooks {
-  /** Called for an answer that arrives without a speaker (a kernel that predates the contract). */
-  onUnstamped?: () => void;
+  /** Called with the provider's reply for every bubble that was sent. */
+  onSent?: (result: SendMessageResult) => void;
 }
 
 /**
@@ -29,22 +42,40 @@ export function systemAnswer(text: string, notice?: SystemNotice): SemanticAnswe
   return { text, speaker: SYSTEM, ...(notice ? { systemNotice: notice } : {}) };
 }
 
+/** An agent's own words, e.g. the pace acknowledgement, under its speaker. */
+export function agentAnswer(text: string, speaker: AgentSpeaker): SemanticAnswer {
+  return { text, speaker };
+}
+
+/**
+ * The answer with the speaker the resolver named before the turn filled in
+ * when the answer carries none. An answer's own speaker always wins (a
+ * `system` notice must stay one). `undefined` when neither names a speaker.
+ */
+export function stampSpeaker(answer: SemanticAnswer, resolved: AgentSpeaker | undefined): SemanticAnswer | undefined {
+  if (answer.speaker !== undefined) return answer;
+  return resolved ? { ...answer, speaker: resolved } : undefined;
+}
+
 /**
  * Send one answer to `number` as the bubbles the renderer produces, in order
  * (sequential on purpose: a bare-URL bubble has to land after the text).
- * Returns the ids of the registry decorations that were attached.
+ * Returns the ids of the registry decorations that were attached. Throws
+ * {@link MissingSpeakerError} before sending anything for an unstamped answer.
  */
 export async function emitAnswer(
-  client: SendblueClient,
+  client: Pick<SendblueClient, 'sendMessage'>,
   number: string,
   answer: SemanticAnswer,
   render: RenderOptions,
   hooks: EmitHooks = {},
 ): Promise<readonly string[]> {
-  if (answer.speaker === undefined) hooks.onUnstamped?.();
+  if (answer.speaker === undefined) throw new MissingSpeakerError();
   const { bubbles, decorations } = renderAnswerParts(answer, render);
   for (const content of bubbles) {
-    await client.sendMessage({ number, content });
+    // Awaited first: an optional call does not evaluate its arguments when the hook is absent.
+    const result = await client.sendMessage({ number, content });
+    hooks.onSent?.(result);
   }
   return decorations;
 }

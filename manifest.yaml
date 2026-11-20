@@ -33,13 +33,18 @@ identity:
     - "communication"
 
 # compat.core is checked against the host's @omadia/plugin-api version. The
-# floor is the first release after the host started claiming
-# permissions.public_paths for channel plugins (byte5ai/omadia#1616). On an
-# older host the public routes below could be declared but never served, so
-# every Sendblue delivery would answer 401 — refusing the install is the
-# honest failure.
+# floor is a PLACEHOLDER (>=1.74.0) for the first release that carries the
+# agents-as-colleagues contract (byte5ai/omadia#2042): the channel resolver
+# answers `bound` or `reject` (never a fallback) with the agent's speaker
+# before the answer, `/agent` is carried out by the resolver's ChatAgent, and
+# the principal is the SDK's channelUserPrincipal. It also covers the older
+# floor, permissions.public_paths for channel plugins (byte5ai/omadia#1616):
+# on an older host the public routes below could be declared but never served,
+# so every Sendblue delivery would answer 401. The parent session sets the
+# final floor when the kernel lands; refusing the install on an older host is
+# the honest failure.
 compat:
-  core: ">=1.47.0 <2.0"
+  core: ">=1.74.0 <2.0"
   node: ">=20"
 
 depends_on: []

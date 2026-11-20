@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { InMemorySpeakerHistoryStore, type SemanticAnswer } from '@omadia/channel-sdk';
 
-import { emitAnswer, systemAnswer } from '../src/emit.js';
+import { MissingSpeakerError, agentAnswer, emitAnswer, stampSpeaker, systemAnswer } from '../src/emit.js';
 import type { SendblueClient } from '../src/sendblueClient.js';
 
 // Spec 2042 criterion 5: every user-visible message carries its speaker, and a
@@ -53,20 +53,47 @@ describe('emitter paths (criterion 5)', () => {
 
   const ctx = () => ({ conversationKey: 'c', speakerHistory: new InMemorySpeakerHistoryStore() });
 
-  it('reports an answer that arrives without a speaker, and still delivers it', async () => {
+  it('refuses an answer that arrives without a speaker: nothing is sent (fail-closed)', async () => {
     const { client, sent } = recordingClient();
-    let unstamped = 0;
-    await emitAnswer(client, '+1', { text: 'Hallo.' } as SemanticAnswer, ctx(), {
-      onUnstamped: () => (unstamped += 1),
-    });
-    assert.equal(unstamped, 1);
-    assert.deepEqual(sent, ['Hallo.']);
+    await assert.rejects(
+      emitAnswer(client, '+1', { text: 'Hallo.' } as SemanticAnswer, ctx()),
+      MissingSpeakerError,
+    );
+    assert.deepEqual(sent, []);
   });
 
-  it('does not report a stamped answer', async () => {
-    const { client } = recordingClient();
-    let unstamped = 0;
-    await emitAnswer(client, '+1', systemAnswer('Hinweis.'), ctx(), { onUnstamped: () => (unstamped += 1) });
-    assert.equal(unstamped, 0);
+  it('sends a stamped answer and reports every sent bubble to the hook', async () => {
+    const { client, sent } = recordingClient();
+    let reported = 0;
+    await emitAnswer(client, '+1', systemAnswer('Hinweis.'), ctx(), { onSent: () => (reported += 1) });
+    assert.deepEqual(sent, ['Hinweis.']);
+    assert.equal(reported, 1);
+  });
+
+  it('sends without a hook (the optional hook must not skip the send)', async () => {
+    const { client, sent } = recordingClient();
+    await emitAnswer(client, '+1', systemAnswer('Hinweis.'), ctx());
+    assert.deepEqual(sent, ['Hinweis.']);
+  });
+});
+
+describe('stampSpeaker', () => {
+  const MIRA = { kind: 'agent', agentId: 'ag-mira', slug: 'mira', displayName: 'Mira' } as const;
+
+  it("fills the resolver's speaker into an answer that has none", () => {
+    assert.deepEqual(stampSpeaker({ text: 'x' } as SemanticAnswer, MIRA)?.speaker, MIRA);
+  });
+
+  it("an answer's own speaker wins, a system notice stays one", () => {
+    const notice = systemAnswer('Hinweis.');
+    assert.deepEqual(stampSpeaker(notice, MIRA)?.speaker, { kind: 'system' });
+  });
+
+  it('is undefined when neither names a speaker', () => {
+    assert.equal(stampSpeaker({ text: 'x' } as SemanticAnswer, undefined), undefined);
+  });
+
+  it('agentAnswer speaks under the given agent', () => {
+    assert.deepEqual(agentAnswer('Ich kümmere mich.', MIRA).speaker, MIRA);
   });
 });

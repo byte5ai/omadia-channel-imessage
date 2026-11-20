@@ -21,6 +21,9 @@ const SECRET = 'test-webhook-secret-0123456789abcdef';
 const LINE = '+15550001111';
 const SENDER = '+491701234567';
 
+/** The agent the kernel names for the default (resolver-less) path in these tests. */
+const HARNESS_SPEAKER = { kind: 'agent', agentId: 'ag-default', slug: 'default', displayName: 'Standard' } as const;
+
 interface ChatCall {
   userMessage: string;
   sessionScope: string;
@@ -69,6 +72,7 @@ async function startHarness(
   config: Record<string, string> = {},
   extraServices: Record<string, unknown> = {},
   deps: ActivationDeps = {},
+  coreExtra: Record<string, unknown> = {},
 ): Promise<Harness> {
   const chatCalls: ChatCall[] = [];
   const sends: SendblueSend[] = [];
@@ -108,7 +112,10 @@ async function startHarness(
         chat: async (input: ChatCall): Promise<SemanticAnswer> => {
           chatCalls.push(input);
           const next = scriptedAnswers.length > 1 ? scriptedAnswers.shift() : scriptedAnswers[0];
-          return next ?? { text: 'Antwort vom Agenten.' };
+          // The harness plays the kernel, which stamps every answer with its
+          // speaker; a scripted answer that names its own (or `system`) keeps it.
+          const answer = next ?? { text: 'Antwort vom Agenten.' };
+          return 'speaker' in answer ? answer : { ...answer, speaker: HARNESS_SPEAKER };
         },
       },
     },
@@ -149,6 +156,7 @@ async function startHarness(
     registerRouter: (_channelId: string, prefix: string) => {
       coreRouterPrefixes.push(prefix);
     },
+    ...coreExtra,
   };
 
   const handle = await activate(ctx, core as never, deps);
@@ -515,7 +523,7 @@ describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
     return {
       chat: async (input: { userMessage: string }): Promise<SemanticAnswer> => {
         calls.push(`${label}:${input.userMessage}`);
-        return { text: `von ${label}` };
+        return { text: `von ${label}`, speaker: { kind: 'agent', agentId: label, slug: label, displayName: label } };
       },
     };
   }
@@ -574,34 +582,33 @@ describe('plugin.activate — US7 Agent binding (channelResolver)', () => {
     }
   });
 
-  it('prefers an explicit binding over a platform fallback', async () => {
-    const fallback: string[] = [];
-    const boundCalls: string[] = [];
-    const { harness } = await runWithResolver((_t, key) =>
-      key === SENDER
-        ? { decision: 'fallback', chatAgent: recordingAgent(fallback, 'fallback-agent') }
-        : { decision: 'bound', chatAgent: recordingAgent(boundCalls, 'line-agent') },
+  it('a reject with a no_agent notice on the sender still lets the line binding answer', async () => {
+    const lineCalls: string[] = [];
+    const { probes, harness } = await runWithResolver((_t, key) =>
+      key === LINE
+        ? { decision: 'bound', chatAgent: recordingAgent(lineCalls, 'line-agent') }
+        : { decision: 'reject', notice: { code: 'no_agent', text: 'Schreib /agent Name.', locale: 'de' } },
     );
     try {
       await postWebhook(harness.base, SECRET, inbound());
-      await waitFor(() => boundCalls.length === 1, 'bound agent won over the fallback');
-      assert.equal(fallback.length, 0, 'a fallback must never beat an explicit binding');
+      await waitFor(() => lineCalls.length === 1, 'line-bound agent handled the turn');
+      assert.deepEqual(probes.map((p) => p.channelKey), [SENDER, LINE]);
     } finally {
       await harness.close();
     }
   });
 
-  it('uses the remembered fallback when nothing is explicitly bound', async () => {
+  it('there is no fallback: the legacy "fallback" decision is not an answer', async () => {
     const fallback: string[] = [];
-    const { harness } = await runWithResolver((_t, key) =>
-      key === SENDER
-        ? { decision: 'fallback', chatAgent: recordingAgent(fallback, 'fallback-agent') }
-        : { decision: 'reject' },
-    );
+    const { harness } = await runWithResolver(() => ({
+      decision: 'fallback',
+      chatAgent: recordingAgent(fallback, 'fallback-agent'),
+    }));
     try {
       await postWebhook(harness.base, SECRET, inbound());
-      await waitFor(() => fallback.length === 1, 'fallback agent handled the turn');
-      assert.equal(harness.chatCalls.length, 0);
+      await waitFor(() => harness.sends.length === 1, 'refusal notice sent');
+      assert.equal(fallback.length, 0, 'a fallback agent must never answer');
+      assert.match(String(harness.sends[0]?.body.content), /kein Agent zugewiesen/);
     } finally {
       await harness.close();
     }
@@ -739,7 +746,7 @@ describe('plugin.activate — agents as colleagues (spec 2042)', () => {
     try {
       await postWebhook(h.base, SECRET, inbound());
       await waitFor(() => h.sends.length === 1, 'answer');
-      assert.deepEqual(contexts, [{ principal: `user:${SENDER}` }]);
+      assert.deepEqual(contexts, [{ principal: `user:custom:${SENDER}` }]);
     } finally {
       await h.close();
     }
@@ -843,6 +850,7 @@ describe('plugin.activate — agents as colleagues (spec 2042)', () => {
         channelResolver: {
           resolve: () => ({
             decision: 'bound',
+            speaker: MIRA,
             chatAgent: {
               chat: () => new Promise<SemanticAnswer>((r) => (release = r)),
             },
@@ -877,6 +885,204 @@ describe('plugin.activate — agents as colleagues (spec 2042)', () => {
       await waitFor(() => h.sends.length === 1, 'answer');
       await clock.advance(60_000);
       assert.equal(h.sends.length, 1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  for (const command of ['/agent', '/agent Mira', '/agents']) {
+    it(`passes "${command}" to the resolver ChatAgent as plain text, unchanged`, async () => {
+      const seen: string[] = [];
+      const h = await startHarness(
+        {},
+        {
+          channelResolver: {
+            resolve: () => ({
+              decision: 'bound',
+              speaker: MIRA,
+              chatAgent: {
+                chat: async (input: { userMessage: string }): Promise<SemanticAnswer> => {
+                  seen.push(input.userMessage);
+                  return {
+                    text: 'Erledigt.',
+                    speaker: { kind: 'system' },
+                    systemNotice: { code: 'agent_directory', text: 'Erledigt.', locale: 'de' },
+                  } as unknown as SemanticAnswer;
+                },
+              },
+            }),
+          },
+        },
+      );
+      try {
+        await postWebhook(h.base, SECRET, inbound({ content: command }));
+        await waitFor(() => h.sends.length === 1, 'notice');
+        assert.deepEqual(seen, [command], 'no channel-side routing of the command');
+        assert.deepEqual(bubbles(h), ['Erledigt.']);
+      } finally {
+        await h.close();
+      }
+    });
+  }
+
+  it('on a reject, /agent still reaches the resolver ChatAgent and its system answer is what the sender gets', async () => {
+    const seen: string[] = [];
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'reject',
+            notice: { code: 'no_agent', text: 'Niemand zugewiesen.', locale: 'de' },
+            chatAgent: {
+              chat: async (input: { userMessage: string }): Promise<SemanticAnswer> => {
+                seen.push(input.userMessage);
+                return {
+                  text: 'Du sprichst jetzt mit Mira.',
+                  speaker: { kind: 'system' },
+                  systemNotice: { code: 'agent_selected', text: 'Du sprichst jetzt mit Mira.', locale: 'de' },
+                } as unknown as SemanticAnswer;
+              },
+            },
+          }),
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound({ content: '/agent Mira' }));
+      await waitFor(() => h.sends.length === 1, 'selection notice');
+      assert.deepEqual(seen, ['/agent Mira']);
+      assert.deepEqual(bubbles(h), ['Du sprichst jetzt mit Mira.']);
+      assert.equal(h.chatCalls.length, 0, 'the default agent never runs on a reject');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('on a reject, words the resolver ChatAgent returns under an agent speaker are withheld: the notice goes out as system (INV-7)', async () => {
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'reject',
+            notice: { code: 'agent_disabled', text: 'Mira ist zurzeit deaktiviert.', locale: 'de' },
+            chatAgent: agentReturning({ text: 'Ich antworte trotzdem.', speaker: MIRA } as unknown as SemanticAnswer),
+          }),
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'notice');
+      assert.deepEqual(bubbles(h), ['Mira ist zurzeit deaktiviert.']);
+      assert.ok(h.logs.some((l) => l.includes('did not answer as system')));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('withholds an answer without any speaker and tells the sender with a system notice (fail-closed)', async () => {
+    scriptedAnswers = [{ text: 'Ohne Absender.', speaker: undefined }];
+    const h = await startHarness();
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'failure notice');
+      assert.doesNotMatch(bubbles(h)[0] ?? '', /Ohne Absender/);
+      assert.match(bubbles(h)[0] ?? '', /Fehler aufgetreten/);
+      assert.ok(h.logs.some((l) => l.includes('withheld')));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("stamps an answer that has no speaker with the one the resolver named before the turn", async () => {
+    let speaker: typeof MIRA | typeof BEN = MIRA;
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'bound',
+            speaker,
+            chatAgent: agentReturning({ text: 'Antwort.' } as SemanticAnswer),
+          }),
+        },
+      },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'first answer');
+      speaker = BEN;
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 2, 'second answer');
+      assert.deepEqual(bubbles(h), ['Antwort.', 'Ben: Antwort.']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("sends the pace acknowledgement under the agent's own speaker, not as system", async () => {
+    const clock = manualClock();
+    let speaker: typeof MIRA | typeof BEN = BEN;
+    let release: (a: SemanticAnswer) => void = () => undefined;
+    let slow = false;
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () => ({
+            decision: 'bound',
+            speaker,
+            chatAgent: {
+              chat: (): Promise<SemanticAnswer> =>
+                slow
+                  ? new Promise<SemanticAnswer>((r) => (release = r))
+                  : Promise.resolve({ text: 'Erste Antwort.', speaker: BEN } as unknown as SemanticAnswer),
+            },
+          }),
+        },
+      },
+      { paceClock: clock.clock },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'first answer');
+      speaker = MIRA;
+      slow = true;
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => clock.pending() > 0, 'pace timer armed');
+      await clock.advance(8_001);
+      await waitFor(() => h.sends.length === 2, 'acknowledgement');
+      // A `system` voice would carry no name; the speaker changed from Ben to
+      // Mira, so only an agent-voiced message gets the name line.
+      assert.equal(bubbles(h)[1], 'Mira: Ich kümmere mich darum, das dauert einen Moment.');
+      release({ text: 'Fertig.', speaker: MIRA } as unknown as SemanticAnswer);
+      await waitFor(() => h.sends.length === 3, 'the answer');
+      // Two agents have now spoken in this conversation: the name line stays.
+      assert.equal(bubbles(h)[2], 'Mira: Fertig.');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sends no acknowledgement when no speaker was resolved before the turn (no resolver): typing only', async () => {
+    const clock = manualClock();
+    let release: (a: SemanticAnswer) => void = () => undefined;
+    const h = await startHarness(
+      {},
+      {
+        chatAgent: { agent: { chat: () => new Promise<SemanticAnswer>((r) => (release = r)) } },
+      },
+      { paceClock: clock.clock },
+    );
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => clock.pending() > 0, 'pace timer armed');
+      await clock.advance(30_000);
+      assert.equal(h.sends.length, 0, 'no acknowledgement under a name nobody resolved');
+      release({ text: 'Fertig.', speaker: MIRA } as unknown as SemanticAnswer);
+      await waitFor(() => h.sends.length === 1, 'the answer');
     } finally {
       await h.close();
     }

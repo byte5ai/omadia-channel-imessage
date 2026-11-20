@@ -24,8 +24,8 @@ import {
   CHANNEL_RESOLVER_SERVICE,
   principalFor,
   resolveAgentForTurn,
-  type AgentRefusal,
   type ChannelBindingResolver,
+  type RefusedRoute,
 } from './agentResolution.js';
 import { AnswerStore } from './answerStore.js';
 import { createAnswersRouter } from './answersRouter.js';
@@ -34,7 +34,7 @@ import {
   type ChannelDirectoryRegistryShim,
 } from './channelKeyDirectory.js';
 import { PendingChoices } from './choiceReply.js';
-import { emitAnswer, systemAnswer } from './emit.js';
+import { agentAnswer, emitAnswer, stampSpeaker, systemAnswer } from './emit.js';
 import { createLruSet, evaluateInbound, normalizePhone } from './inbound.js';
 import { isAnswerLinkAdmitted, type DecorationGate } from './renderer.js';
 import { SendblueClient } from './sendblueClient.js';
@@ -336,27 +336,45 @@ interface TurnRuntime {
   paceClock?: PaceClock;
 }
 
+/** What the turn hands to the agent: the text, the session, the sender. */
+function chatInput(turn: IncomingTurn): Parameters<ChatAgent['chat']>[0] {
+  return {
+    userMessage: turn.text,
+    sessionScope: `imessage:${turn.conversationId}`,
+    userId: turn.userRef.id,
+    ...(turn.attachments && turn.attachments.length > 0 ? { attachments: turn.attachments } : {}),
+  };
+}
+
 /** Drive one orchestrator turn and ship the rendered answer back via Sendblue. */
 async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
   const { ctx, core, client, state } = rt;
-  // US7 — most-specific key first: a binding on the sender's E.164, then a
+  // US7 — most-specific key first: a binding on the sender's number, then a
   // binding on the line itself (the key the channel directory lists). The
   // sender's principal lets the kernel apply this user's own selection
   // (`/agent <Name>`) ahead of a binding. Without a published resolver the
   // default agent answers.
   const principal = principalFor(turn.userRef.id);
-  const resolved = resolveAgentForTurn(
+  const route = resolveAgentForTurn(
     ctx.services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE),
     CHANNEL_TYPE,
     [turn.conversationId, state.me?.fromNumber],
     rt.defaultAgent,
     principal ? { principal } : {},
   );
-  if ('refused' in resolved) {
-    await refuseTurn(rt, turn, resolved);
+  if (route.kind === 'resolver-failed') {
+    core.log('error', 'iMessage turn refused: the channel resolver failed', {
+      conversationId: turn.conversationId,
+      error: route.error,
+    });
+    await sendNotice(rt, turn, turnFailedNotice());
     return;
   }
-  const agent = resolved.agent;
+  if (route.kind === 'refused') {
+    await refuseTurn(rt, turn, route);
+    return;
+  }
+  const { agent, speaker } = route;
 
   const conversation = {
     conversationKey: turn.conversationId,
@@ -370,25 +388,23 @@ async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
     // turn needs no follow-up switch. Started only once an agent is known — a
     // refused turn shows no "typing". Hook failures never fail the turn.
     const { result: answer } = await runPacedTurn(
-      () =>
-        agent.chat({
-          userMessage: turn.text,
-          sessionScope: `imessage:${turn.conversationId}`,
-          userId: turn.userRef.id,
-          ...(turn.attachments && turn.attachments.length > 0
-            ? { attachments: turn.attachments }
-            : {}),
-        }),
+      () => agent.chat(chatInput(turn)),
       DEFAULT_PACE_PROFILE,
       {
         sendTyping: async () => {
           const ok = await client.sendTypingIndicator(turn.conversationId);
           if (!ok) core.log('debug', 'iMessage typing indicator failed (ignored)');
         },
-        // The acknowledgement is a notice of the channel: the resolved agent's
-        // identity is not known here, so it speaks as `system`.
+        // The acknowledgement is the agent's own words, so it goes out under
+        // the agent the resolver named before the turn. Without a speaker
+        // (a host with no resolver) it is not sent: the typing indicator
+        // stays, and a `system` voice saying "I am on it" would be wrong.
         sendAck: async (text) => {
-          await emitAnswer(client, turn.conversationId, systemAnswer(text), conversation);
+          if (!speaker) {
+            core.log('debug', 'iMessage pace acknowledgement skipped: no speaker resolved before the turn');
+            return;
+          }
+          await emitAnswer(client, turn.conversationId, agentAnswer(text, speaker), conversation);
         },
         onHookError: (hook, error) =>
           core.log('debug', `iMessage pace hook failed (ignored): ${hook}`, {
@@ -401,28 +417,35 @@ async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
       logNoReplyDrop(turn.channelId, { conversationId: turn.conversationId });
       return;
     }
+    // Fail-closed: an answer names its speaker itself or through the
+    // resolver's pre-turn decision. With neither, the words are withheld and
+    // the sender gets a `system` notice, never text under no (or a guessed)
+    // name. This is a platform fault, not a fault of this channel: the
+    // channel status is left alone.
+    const stamped = stampSpeaker(answer, speaker);
+    if (!stamped) {
+      core.log('error', 'iMessage answer withheld: it carries no speaker and the resolver named none', {
+        conversationId: turn.conversationId,
+      });
+      await sendNotice(rt, turn, turnFailedNotice());
+      return;
+    }
     // Deep-link Phase 1: a choice card gets a capability URL so the user can
     // pick in the app / browser instead of typing, but only where the
     // decoration registry declares that affordance for this channel. Creating
     // the entry supersedes any older open link of this conversation.
     let choiceLinkUrl: string | undefined;
-    if (rt.links && answer.interactive?.kind === 'choice' && isAnswerLinkAdmitted(rt.admit)) {
-      const entry = rt.links.store.create(turn.conversationId, answer.interactive);
+    if (rt.links && stamped.interactive?.kind === 'choice' && isAnswerLinkAdmitted(rt.admit)) {
+      const entry = rt.links.store.create(turn.conversationId, stamped.interactive);
       choiceLinkUrl = `${rt.links.publicBaseUrl}${ROUTE_PREFIX}/a/${entry.token}`;
     }
-    await emitAnswer(
-      client,
-      turn.conversationId,
-      answer,
-      {
-        ...conversation,
-        ...(choiceLinkUrl ? { choiceLinkUrl } : {}),
-        ...(rt.admit ? { admit: rt.admit } : {}),
-      },
-      { onUnstamped: () => core.log('warn', 'iMessage answer arrived without a speaker') },
-    );
+    await emitAnswer(client, turn.conversationId, stamped, {
+      ...conversation,
+      ...(choiceLinkUrl ? { choiceLinkUrl } : {}),
+      ...(rt.admit ? { admit: rt.admit } : {}),
+    });
     // The numbered question is now open: a bare number answers it.
-    rt.pending.record(turn.conversationId, answer.interactive);
+    rt.pending.record(turn.conversationId, stamped.interactive);
     // A successful send clears a previously surfaced send error and takes the
     // channel back out of the error state.
     if (state.lastError) patchState(state, { lastError: null, status: 'connected' });
@@ -445,52 +468,73 @@ async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
   }
 }
 
-/**
- * Answer a turn no Agent may handle (byte5ai/omadia#1598, spec 2042 INV-7).
- * The host refuses a conversation its binding resolver rejects rather than
- * letting another orchestrator answer it; this channel says so in the chat, as
- * a `system` notice, instead of running the turn into the default agent. When
- * the kernel supplies the notice (it names the agent and the reason), that
- * text is sent; otherwise the channel's own wording.
- *
- * The channel status is left alone on purpose: a missing binding is an
- * operator configuration gap, not a fault of this channel. Only a failing
- * send — the one thing that IS this channel's job here — is surfaced.
- */
-async function refuseTurn(rt: TurnRuntime, turn: IncomingTurn, refusal: AgentRefusal): Promise<void> {
+/** Send a `system` notice; a failing send is logged and surfaced, never thrown. */
+async function sendNotice(rt: TurnRuntime, turn: IncomingTurn, notice: SemanticAnswer): Promise<void> {
   const { core, client, state } = rt;
-  if (refusal.refused === 'resolver-failed') {
-    core.log('error', 'iMessage turn refused: the channel resolver failed', {
-      conversationId: turn.conversationId,
-      error: refusal.error,
-    });
-  } else {
-    core.log('warn', 'iMessage turn refused: no Agent serves this conversation', {
-      conversationId: turn.conversationId,
-      reason: refusal.refused,
-      ...(refusal.notice ? { notice: refusal.notice.code } : {}),
-    });
-  }
-  // A resolver failure is transient, so "try again" is honest there; a
-  // conversation without an Agent stays without one until someone binds it.
-  const notice =
-    refusal.refused === 'resolver-failed'
-      ? turnFailedNotice()
-      : refusal.notice
-        ? systemAnswer(refusal.notice.text, refusal.notice)
-        : systemAnswer(NO_AGENT_MESSAGE, { code: 'no_agent', text: NO_AGENT_MESSAGE, locale: 'de' });
   try {
     await emitAnswer(client, turn.conversationId, notice, {
       conversationKey: turn.conversationId,
       speakerHistory: rt.speakerHistory,
     });
   } catch (err) {
-    core.log('error', 'failed to send the iMessage refusal notice', {
+    core.log('error', 'failed to send an iMessage notice', {
       error: (err as Error).message,
       conversationId: turn.conversationId,
     });
     patchState(state, { lastError: (err as Error).message, status: 'error' });
   }
+}
+
+/**
+ * Answer a turn no Agent may handle (byte5ai/omadia#1598, spec 2042 INV-7).
+ * The host refuses a conversation its binding resolver rejects rather than
+ * letting another orchestrator answer it; this channel says so in the chat, as
+ * a `system` message, instead of running the turn into the default agent.
+ *
+ * The text goes to the resolver's ChatAgent first: it carries out `/agent
+ * <name>`, `/agent` and `/agents` (a user with no agent yet must be able to
+ * pick one) and otherwise answers with the notice, both as `system`. Only a
+ * `system` answer is sent: should the ChatAgent ever return an agent's
+ * speaker on a reject, those words are withheld (INV-7, never an agent's
+ * answer to a refused turn). Without a ChatAgent, or when it fails, the
+ * kernel's notice is sent as it is, else the channel's own wording.
+ *
+ * The channel status is left alone on purpose: a missing binding is an
+ * operator configuration gap, not a fault of this channel. Only a failing
+ * send — the one thing that IS this channel's job here — is surfaced.
+ */
+async function refuseTurn(rt: TurnRuntime, turn: IncomingTurn, route: RefusedRoute): Promise<void> {
+  const { core } = rt;
+  core.log('warn', 'iMessage turn refused: no Agent serves this conversation', {
+    conversationId: turn.conversationId,
+    reason: route.reason,
+    ...(route.notice ? { notice: route.notice.code } : {}),
+  });
+  let reply: SemanticAnswer = route.notice
+    ? systemAnswer(route.notice.text, route.notice)
+    : systemAnswer(NO_AGENT_MESSAGE, { code: 'no_agent', text: NO_AGENT_MESSAGE, locale: 'de' });
+  if (route.agent) {
+    try {
+      const answer = await route.agent.chat(chatInput(turn));
+      if (isNoReply(answer)) {
+        logNoReplyDrop(turn.channelId, { conversationId: turn.conversationId });
+        return;
+      }
+      if (answer.speaker?.kind === 'system') {
+        reply = answer;
+      } else {
+        core.log('error', 'iMessage reject answer withheld: the resolver ChatAgent did not answer as system', {
+          conversationId: turn.conversationId,
+        });
+      }
+    } catch (err) {
+      core.log('error', 'the resolver ChatAgent failed on a refused iMessage turn', {
+        error: (err as Error).message,
+        conversationId: turn.conversationId,
+      });
+    }
+  }
+  await sendNotice(rt, turn, reply);
 }
 
 /**
