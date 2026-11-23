@@ -22,7 +22,7 @@ omadia is a self-hostable agentic OS: compose multi-agent teams from signed plug
 
 ## What it does
 
-Connects iMessage to omadia through Sendblue, a hosted iMessage relay with a REST API. One-to-one chats sent to your Sendblue line are routed into the omadia orchestrator, and the reply comes back in the same chat (with a best-effort typing indicator while the agent thinks). You can limit access with a phone-number allowlist. Group chats are not supported and are dropped. Users choose the agent they talk to with `/agent <Name>` (see [Agents as colleagues](#agents-as-colleagues)).
+Connects iMessage to omadia through Sendblue, a hosted iMessage relay with a REST API. One-to-one chats sent to your Sendblue line are routed to your agents, and the reply comes back in the same chat (with a best-effort typing indicator while the agent thinks). You can limit access with a phone-number allowlist. Group chats are not supported and are dropped. Users choose the agent they talk to with `/agent <Name>` (see [Agents as colleagues](#agents-as-colleagues)).
 
 > ⚠️ **Note:** Apple offers no public iMessage API — Sendblue is an unofficial relay, so continuity depends on the provider. The connector is provider-swappable: only the thin REST client (`src/sendblueClient.ts`) is Sendblue-specific.
 
@@ -34,9 +34,9 @@ A channel plugin (`kind: channel`). The omadia kernel activates it from `manifes
 POST /api/imessage/webhook/:token
 ```
 
-via `ctx.routes.register` with `auth: 'custom'`. Sendblue has no omadia login, so the manifest declares `/api/imessage` under `permissions.public_paths`; omadia serves that prefix without an operator session only once the operator has granted it (see [Install](#install)). Every inbound Sendblue webhook is verified with a timing-safe shared-secret check (the `:token` path segment — or any request-header value — must equal the configured `webhook_secret`), answered with `200` immediately, and processed asynchronously: status callbacks / echoes / groups / duplicates are filtered, the message becomes an `IncomingTurn` (`channelType: imessage`), the orchestrator answers, and the rendered plain-text reply is sent back through `POST {api_base_url}/api/send-message`.
+via `ctx.routes.register` with `auth: 'custom'`. Sendblue has no omadia login, so the manifest declares `/api/imessage` under `permissions.public_paths`; omadia serves that prefix without an operator session only once the operator has granted it (see [Install](#install)). Every inbound Sendblue webhook is verified with a timing-safe shared-secret check (the `:token` path segment — or any request-header value — must equal the configured `webhook_secret`), answered with `200` immediately, and processed asynchronously: status callbacks / echoes / groups / duplicates are filtered, the message becomes an `IncomingTurn` (`channelType: imessage`), the agent answers, and the rendered plain-text reply is sent back through `POST {api_base_url}/api/send-message`.
 
-It needs an LLM provider assigned to the orchestrator first.
+It needs an LLM provider assigned to the agent runtime first.
 
 ## Install
 
@@ -115,7 +115,7 @@ before you rely on answer links:
   token minted on replica A is unknown to replica B, so a tap that the load
   balancer routes to B 404s. Likewise, Sendblue retries an inbound delivery up
   to 3x; a retry landing on a replica that never saw the original is not
-  recognised as a duplicate and drives the orchestrator a second time.
+  recognised as a duplicate and drives the agent runtime a second time.
 
 Run this channel on a single replica until the store is persisted.
 
@@ -231,7 +231,7 @@ and no other agent answers in its place: that reject ends the search. If nothing
 addresses an agent at all, the sender is told that no Agent is assigned (the
 line key is still tried before). On a reject no agent runs; only a `system`
 message goes out, never an agent's words. On a host without the multi-Agent
-registry, its single orchestrator answers every conversation.
+registry, its single agent runtime answers every conversation.
 
 **Selection key.** omadia ties an agent selection to the narrowest conversation
 key of the turn (the `channelKey` of the resolve call) plus the sender's
@@ -249,7 +249,7 @@ a binding set on the line only. Bind the line only when the default table is
 `off` for this channel, or bind the sender numbers. A `/agent` typed while only
 the line binds is stored under the line key.
 
-The plugin never falls back to the single `chatAgent@1` orchestrator while a
+The plugin never falls back to the single `chatAgent@1` agent runtime while a
 resolver is published, a refusal included: every turn uses the ChatAgent of the
 resolve result. Only a host without a resolver (no multi-agent registry) uses the
 singleton. No locale is passed to the resolver: Sendblue does not report the
@@ -287,14 +287,14 @@ without waiting and the turn runs as before.
 
 > ⚠️ **All message content transits Sendblue's infrastructure** — both
 > directions, including attachments (inbound media is fetched by the
-> orchestrator from Sendblue-hosted URLs). Sendblue is a third-party relay and
+> agent runtime from Sendblue-hosted URLs). Sendblue is a third-party relay and
 > **not an Apple-sanctioned API**; Apple could disrupt relays at any time.
 
 Treat the channel as **opt-in**: enable it deliberately, inform the people who
 will text the line that a relay provider processes the content, and use the
 `allowlist` to keep the audience explicit. omadia's outbound privacy-guard
 masking applies to iMessage exactly as to every other external channel — it
-runs in the orchestrator's answer path, before this plugin renders and sends.
+runs in the agent runtime's answer path, before this plugin renders and sends.
 
 Webhook-secret handling: the secret rides as the last URL path segment, which
 can surface in intermediary access logs (reverse proxies, load balancers). If
@@ -315,7 +315,7 @@ npm run build       # esbuild bundle → dist/plugin.js, then zip in out/
 
 `@omadia/channel-sdk` and `@omadia/plugin-api` are provided by the omadia host at runtime (peer deps, never installed here). For the typecheck (and the test bundle) they are resolved from an adjacent checkout at `../omadia/middleware/packages/*/dist` — build those package dists first (`npm run build` inside each package).
 
-The test suite (`tests/`) covers the markdown-degradation renderer, webhook auth (timing-safe secret, 401 path), inbound filtering (allowlist, dedupe, group drop), the answer-link store/routes, and a full mocked-webhook integration pass (Sendblue stubbed, orchestrator scripted) — no live Sendblue account needed.
+The test suite (`tests/`) covers the markdown-degradation renderer, webhook auth (timing-safe secret, 401 path), inbound filtering (allowlist, dedupe, group drop), the answer-link store/routes, and a full mocked-webhook integration pass (Sendblue stubbed, agent runtime scripted) — no live Sendblue account needed.
 
 ## License
 
