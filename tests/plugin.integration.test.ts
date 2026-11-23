@@ -1598,3 +1598,111 @@ function manualClock() {
   };
   return { clock, advance, pending: () => timers.filter((t) => !t.done).length };
 }
+
+describe('plugin.activate — criterion 5: every emitter path names its speaker', () => {
+  const MIRA = { kind: 'agent', agentId: 'ag-mira', slug: 'mira', displayName: 'Mira' } as const;
+  const BEN = { kind: 'agent', agentId: 'ag-ben', slug: 'ben', displayName: 'Ben' } as const;
+  const bubbles = (h: Harness): string[] => h.sends.map((s) => String(s.body.content));
+
+  /**
+   * Two agents have spoken in the conversation, so a name line is due on every
+   * agent-voiced message: an agent path shows "Ben: …", a `system` path never
+   * does. The line is how the speaker of a plain bubble becomes visible.
+   */
+  it('an agent answer and the pace acknowledgement carry the agent, every notice and a DM carry system', async () => {
+    type Next =
+      | { kind: 'answer' }
+      | { kind: 'system-notice' }
+      | { kind: 'no-speaker' }
+      | { kind: 'throws' }
+      | { kind: 'slow'; release: (a: SemanticAnswer) => void };
+    let next: Next = { kind: 'answer' };
+    let reject = false;
+    let speaker: typeof MIRA | typeof BEN = MIRA;
+    const clock = manualClock();
+    const targeted: TargetedSendProvider[] = [];
+    const h = await startHarness(
+      {},
+      {
+        channelResolver: {
+          resolve: () =>
+            reject
+              ? { decision: 'reject' }
+              : {
+                  decision: 'bound',
+                  speaker,
+                  chatAgent: {
+                    chat: (): Promise<SemanticAnswer> => {
+                      switch (next.kind) {
+                        case 'answer':
+                          return Promise.resolve({ text: 'Antwort.', speaker } as SemanticAnswer);
+                        case 'system-notice':
+                          return Promise.resolve({
+                            text: 'x',
+                            speaker: { kind: 'system' },
+                            systemNotice: { code: 'agent_selected', text: 'Du sprichst jetzt mit Ben.', locale: 'de' },
+                          } as SemanticAnswer);
+                        case 'no-speaker':
+                          return Promise.resolve({ text: 'Ohne Absender.' } as SemanticAnswer);
+                        case 'throws':
+                          return Promise.reject(new Error('boom'));
+                        case 'slow':
+                          return new Promise<SemanticAnswer>((r) => (next = { kind: 'slow', release: r }));
+                      }
+                    },
+                  },
+                },
+        },
+      },
+      { paceClock: clock.clock },
+      { registerTargetedSendProvider: (_id: string, p: TargetedSendProvider) => targeted.push(p) },
+    );
+    const send = async (n: number, what: string) => {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === n, what);
+    };
+    try {
+      // History: Mira, then Ben — from here on a name line is due for agents.
+      await send(1, 'mira answers');
+      speaker = BEN;
+      await send(2, 'ben answers');
+      assert.equal(bubbles(h)[1], 'Ben: Antwort.', 'path 1: an agent answer');
+
+      next = { kind: 'system-notice' };
+      await send(3, 'kernel notice');
+      assert.equal(bubbles(h)[2], 'Du sprichst jetzt mit Ben.', 'path 2: a kernel notice is system, no name');
+
+      next = { kind: 'no-speaker' };
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 4, 'stamped');
+      // The resolver named Ben before the turn: his words are stamped as his,
+      // never sent nameless (the withhold-case without a resolver is covered above).
+      assert.equal(bubbles(h)[3], 'Ben: Ohne Absender.', 'path 3: an answer without a speaker takes the resolver\'s');
+
+      next = { kind: 'throws' };
+      await send(5, 'failure notice');
+      assert.match(bubbles(h)[4] ?? '', /^(?!Ben:)/, 'path 4: a failed turn ends in a system notice, not under the agent');
+      assert.match(bubbles(h)[4] ?? '', /Fehler aufgetreten/);
+
+      next = { kind: 'slow', release: () => undefined };
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => clock.pending() > 0, 'pace timer');
+      await clock.advance(8_001);
+      await waitFor(() => h.sends.length === 6, 'acknowledgement');
+      assert.equal(bubbles(h)[5], 'Ben: Ich kümmere mich darum, das dauert einen Moment.', 'path 5: the pace acknowledgement is the agent');
+      if (next.kind === 'slow') next.release({ text: 'Fertig.', speaker: BEN } as SemanticAnswer);
+      await waitFor(() => h.sends.length === 7, 'the slow answer');
+      assert.equal(bubbles(h)[6], 'Ben: Fertig.');
+
+      reject = true;
+      await send(8, 'refusal');
+      assert.match(bubbles(h)[7] ?? '', /^(?!Ben:).*kein Agent zugewiesen/s, 'path 6: a refusal is system');
+
+      const dm = await targeted[0]?.sendToUser({ principalId: `user:custom:${SENDER}` }, { text: 'Erinnerung.' });
+      assert.equal(dm?.outcome, 'delivered');
+      assert.equal(bubbles(h)[8], 'Erinnerung.', 'path 7: a DM through the shared line is system, no agent name');
+    } finally {
+      await h.close();
+    }
+  });
+});

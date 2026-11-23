@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+User-visible texts no longer say "Orchestrator" (spec 2042 §6 criterion 12, `docs/terminology.md`): the manifest description, the package description, the README and the admin page now speak of your agents and the agent runtime.
+
+- Test: every emitter path (agent answer, pace acknowledgement, kernel notice, failed turn, refusal, DM through the shared line) is driven and names its speaker (criterion 5).
+
 ## 0.4.0
 
 Agents as colleagues (epic byte5ai/omadia#2042, issue #2). **Needs a kernel

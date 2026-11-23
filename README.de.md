@@ -33,7 +33,7 @@ aus iMessage erreichbar. Haupt-Repo:
 
 Verbindet iMessage über Sendblue — einen gehosteten iMessage-Relay mit REST-API
 — mit omadia. Einzelchats an deine Sendblue-Line werden in den
-omadia-Orchestrator geleitet, und die Antwort kommt im selben Chat zurück (mit
+deine Agenten geleitet, und die Antwort kommt im selben Chat zurück (mit
 Best-Effort-Tipp-Indikator, während der Agent nachdenkt). Den Zugriff kannst du
 mit einer Nummern-Allowlist begrenzen. Gruppenchats werden in v1 nicht
 unterstützt und verworfen.
@@ -62,10 +62,10 @@ geprüft (das Pfadsegment `:token` — oder ein beliebiger Request-Header-Wert �
 muss dem konfigurierten `webhook_secret` entsprechen), sofort mit `200`
 beantwortet und asynchron verarbeitet: Status-Callbacks / Echos / Gruppen /
 Duplikate werden gefiltert, die Nachricht wird zum `IncomingTurn`
-(`channelType: imessage`), der Orchestrator antwortet, und die gerenderte
+(`channelType: imessage`), der Agent antwortet, und die gerenderte
 Klartext-Antwort geht per `POST {api_base_url}/api/send-message` zurück.
 
-Es braucht zuerst einen LLM-Provider, der dem Orchestrator zugewiesen ist.
+Es braucht zuerst ein Modell, das der Agent-Runtime zugewiesen ist.
 
 ## Installation
 
@@ -164,7 +164,7 @@ man vor dem Einsatz von Antwort-Links kennen sollte:
   Load-Balancer auf B leitet, läuft auf 404. Ebenso wiederholt Sendblue eine
   eingehende Zustellung bis zu 3x; ein Retry auf einer Replica, die das
   Original nie gesehen hat, gilt nicht als Duplikat und startet den
-  Orchestrator ein zweites Mal.
+  die Agent-Runtime ein zweites Mal.
 
 Bis der Store persistiert ist: diesen Channel auf einer einzelnen Replica
 betreiben.
@@ -288,7 +288,7 @@ an seiner Stelle: Dieses Reject beendet die Suche. Spricht gar nichts einen
 Agenten an, erfährt der Absender, dass kein Agent zugewiesen ist (vorher wird
 noch der Line-Key versucht). Bei einem Reject läuft kein Agent; es geht nur eine
 `system`-Nachricht raus, nie Worte eines Agenten. Auf einem Host ohne
-Multi-Agent-Registry beantwortet dessen einziger Orchestrator jede Unterhaltung.
+Multi-Agent-Registry beantwortet dessen einzige Agent-Runtime jede Unterhaltung.
 
 **Auswahlschlüssel.** omadia hängt eine Agentenauswahl an den engsten
 Gesprächsschlüssel des Turns (der `channelKey` des Resolve-Aufrufs) plus den
@@ -308,7 +308,7 @@ Default-Tabelle für diesen Channel `off` ist, oder die Absender-Nummern binden.
 Ein `/agent`, das getippt wird, während nur die Line bindet, wird unter dem
 Line-Key gespeichert.
 
-Das Plugin fällt nie auf den einzelnen `chatAgent@1`-Orchestrator zurück, solange
+Das Plugin fällt nie auf den einzelnen `chatAgent@1`-Agent-Runtime zurück, solange
 ein Resolver veröffentlicht ist, auch nicht nach einer Ablehnung: Jeder Turn
 nutzt den ChatAgent des Resolve-Ergebnisses. Nur ein Host ohne Resolver (keine
 Multi-Agent-Registry) nutzt den Singleton. Es wird keine Sprache an den Resolver
@@ -350,7 +350,7 @@ ohne Warten gemeldet und der Turn läuft wie bisher.
 
 > ⚠️ **Sämtlicher Nachrichteninhalt läuft über die Infrastruktur von
 > Sendblue** — in beide Richtungen, inklusive Anhängen (eingehende Medien
-> holt der Orchestrator von Sendblue-gehosteten URLs). Sendblue ist ein
+> holt die Agent-Runtime von Sendblue-gehosteten URLs). Sendblue ist ein
 > Dritt-Relay und **keine von Apple sanktionierte API**; Apple kann Relays
 > jederzeit stören.
 
@@ -358,7 +358,7 @@ Behandle den Channel als **Opt-in**: aktiviere ihn bewusst, informiere die
 Personen, die die Line anschreiben, dass ein Relay-Provider die Inhalte
 verarbeitet, und halte den Kreis mit der `allowlist` explizit. omadias
 Outbound-Privacy-Guard-Maskierung greift bei iMessage genau wie bei jedem
-anderen externen Channel — sie läuft im Antwort-Pfad des Orchestrators, bevor
+anderen externen Channel — sie läuft im Antwort-Pfad der Agent-Runtime, bevor
 dieses Plugin rendert und sendet.
 
 Zum Webhook-Secret: Das Secret steht als letztes URL-Pfadsegment und kann in
@@ -389,7 +389,7 @@ Die Test-Suite (`tests/`) deckt den Markdown-Degradation-Renderer, die
 Webhook-Authentifizierung (timing-sicheres Secret, 401-Pfad), das
 Inbound-Filtern (Allowlist, Dedupe, Gruppen-Drop), Store/Routen der
 Antwort-Links sowie einen kompletten Mocked-Webhook-Integrationslauf ab
-(Sendblue gestubbt, Orchestrator geskriptet) — kein Live-Sendblue-Konto
+(Sendblue gestubbt, Agent-Runtime geskriptet) — kein Live-Sendblue-Konto
 nötig.
 
 ## Lizenz

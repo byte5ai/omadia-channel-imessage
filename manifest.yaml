@@ -15,13 +15,13 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.4.0" # === package.json "version"
+  version: "0.4.1" # === package.json "version"
   # Every text an operator sees is an { en, de } map (byte5ai/omadia#1401). A
   # bare string would be read as English and shown as written in every UI
   # language.
   description:
-    en: "iMessage channel via the Sendblue REST API; routes iMessage chats into the omadia orchestrator. Users pick their agent with /agent <Name>; choices arrive as a numbered list answered by number."
-    de: "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats in den Omadia-Orchestrator. Nutzer wählen ihren Agenten mit /agent <Name>; Auswahlfragen kommen als nummerierte Liste und werden per Nummer beantwortet."
+    en: "iMessage channel via the Sendblue REST API; routes iMessage chats to your agents. Users pick their agent with /agent <Name>; choices arrive as a numbered list answered by number."
+    de: "iMessage-Channel via Sendblue REST-API; routet iMessage-Chats an deine Agenten. Nutzer wählen ihren Agenten mit /agent <Name>; Auswahlfragen kommen als nummerierte Liste und werden per Nummer beantwortet."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
