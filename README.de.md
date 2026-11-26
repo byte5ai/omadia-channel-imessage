@@ -346,6 +346,10 @@ läuft. Liest omadia alle Nachrichten einer Unterhaltung selbst
 kein Turn. Auf einem Kernel ohne `reportConversationMessage` wird die Nachricht
 ohne Warten gemeldet und der Turn läuft wie bisher.
 
+## Erinnerungen und Routinen
+
+Ein Agent kann dir in einem iMessage-Chat eine Erinnerung, einen Trigger oder eine wiederkehrende Routine einrichten („erinnere mich morgen um neun“). Das Plugin öffnet bei jedem beantworteten Turn den Routinen-Scope des Kernels (`routinesIntegration.beginRoutineTurn`, nie bei einem abgelehnten), damit der Agent diese Werkzeuge dort angeboten bekommt, und registriert einen proaktiven Sender für `imessage`, damit die Zustellung später an dieselbe Nummer geht: die Nachricht eines Agenten mit Namenszeile, wo nötig, eine Nachricht des Systems (zum Beispiel eine Freigabeanfrage) als Klartext. Ein Lauf ohne Neuigkeiten sendet nichts. Eine Nummer, die nicht mehr auf der Allowlist steht, bekommt nichts; der Lauf schlägt stattdessen fehl. Braucht einen Kernel mit Datenbank (`routinesIntegration`); ohne ihn richten Agenten hier keine Erinnerungen ein, alles andere funktioniert wie bisher.
+
 ## Datenschutz & Datentransit
 
 > ⚠️ **Sämtlicher Nachrichteninhalt läuft über die Infrastruktur von

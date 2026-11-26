@@ -48,11 +48,27 @@ function bodyText(message: TargetedMessage): string {
   return [message.text.trim(), ...lines].filter((part) => part.length > 0).join('\n\n');
 }
 
-async function deliverTo(deps: SendProviderDeps, number: string, message: TargetedMessage): Promise<TargetedDeliveryOutcome> {
-  if (!/^\+?\d{6,15}$/.test(number)) return unreachable('user_not_found', 'not an iMessage number');
-  if (deps.allowlist.size > 0 && !deps.allowlist.has(normalizePhone(number))) {
-    return unreachable('not_permitted', "the number is not on this channel's allowlist");
+/** Why a number may not be messaged: not an iMessage number, or outside the allowlist. */
+export interface NumberRefusal {
+  readonly code: 'user_not_found' | 'not_permitted';
+  readonly message: string;
+}
+
+/**
+ * The one check every proactive path runs before it sends (these providers
+ * and the routines' delivery), so all of them refuse the same numbers.
+ */
+export function numberRefusal(number: string, allowlist: ReadonlySet<string>): NumberRefusal | undefined {
+  if (!/^\+?\d{6,15}$/.test(number)) return { code: 'user_not_found', message: 'not an iMessage number' };
+  if (allowlist.size > 0 && !allowlist.has(normalizePhone(number))) {
+    return { code: 'not_permitted', message: "the number is not on this channel's allowlist" };
   }
+  return undefined;
+}
+
+async function deliverTo(deps: SendProviderDeps, number: string, message: TargetedMessage): Promise<TargetedDeliveryOutcome> {
+  const refusal = numberRefusal(number, deps.allowlist);
+  if (refusal) return unreachable(refusal.code, refusal.message);
   // Not declared, so the kernel does not hand them over; refuse rather than
   // drop silently should one arrive anyway.
   if (message.poll || message.card) {

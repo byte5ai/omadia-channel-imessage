@@ -18,7 +18,7 @@ import {
   type IncomingTurn,
   type SemanticAnswer,
 } from '@omadia/channel-sdk';
-import type { PluginContext } from '@omadia/plugin-api';
+import type { PluginContext, RoutinesIntegration } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
 import {
@@ -35,6 +35,12 @@ import {
 import { createdEventFor } from './conversationEvents.js';
 import { PendingChoices } from './choiceReply.js';
 import { agentAnswer, emitAnswer, stampSpeaker, systemAnswer } from './emit.js';
+import {
+  IMESSAGE_ROUTINE_CHANNEL,
+  createIMessageProactiveSend,
+  createIMessageRoutineTurn,
+  type IMessageRoutineTurn,
+} from './imessageRoutines.js';
 import { createLruSet, evaluateInbound, normalizePhone, type SendbluePayload } from './inbound.js';
 import { isAnswerLinkAdmitted, type DecorationGate } from './renderer.js';
 import { SendblueClient } from './sendblueClient.js';
@@ -118,6 +124,10 @@ export async function activate(
   const state = createChannelState();
   patchState(state, { me: { fromNumber } });
 
+  // Triggers and routines (spec 2042 §5.12, omadia#1086): published by the
+  // kernel only with a database. Absent = agents set no triggers or routines here.
+  const routines = ctx.services.get<RoutinesIntegration>('routinesIntegration');
+
   // Everything one turn needs besides the turn itself. The speaker history
   // and the open question are per conversation, in memory (a restart forgets
   // them: an extra name line costs nothing, a forgotten number falls through
@@ -130,6 +140,7 @@ export async function activate(
     links,
     speakerHistory: new InMemorySpeakerHistoryStore(),
     pending: new PendingChoices(),
+    ...(routines ? { routineTurn: createIMessageRoutineTurn(routines, channelId) } : {}),
     ...(deps.admitDecorations ? { admit: deps.admitDecorations } : {}),
     ...(deps.paceClock ? { paceClock: deps.paceClock } : {}),
     ...(deps.reportTimeoutMs !== undefined ? { reportTimeoutMs: deps.reportTimeoutMs } : {}),
@@ -249,6 +260,20 @@ export async function activate(
     core.registerConversationSendProvider(channelId, createConversationSendProvider(sendDeps));
   }
 
+  // Trigger and routine deliveries go to the number they were set by, through
+  // the one emitter, with the turns' speaker history and the same allowlist
+  // as every other send. Removed again on close.
+  const disposeProactiveSend = routines?.publishProactiveSend(
+    IMESSAGE_ROUTINE_CHANNEL,
+    createIMessageProactiveSend({
+      client,
+      allowlist,
+      speakerHistory: runtime.speakerHistory,
+      ...(runtime.admit ? { admit: runtime.admit } : {}),
+    }),
+  );
+  if (routines) core.log('info', 'iMessage proactive send registered (triggers and routines deliver to their number)');
+
   // Webhook mounted + config validated — as connected as a webhook-only
   // channel gets (there is no long-lived connection to watch).
   patchState(state, { status: 'connected' });
@@ -300,6 +325,7 @@ export async function activate(
       // structure is released. The directory contribution is dropped so
       // /operator/channels stops listing this line once the plugin is
       // deactivated.
+      if (typeof disposeProactiveSend === 'function') disposeProactiveSend();
       disposePublicRoutes();
       disposeAdminRoutes();
       directoryRegistry?.unregister(CHANNEL_TYPE);
@@ -343,6 +369,8 @@ interface TurnRuntime {
   links: AnswerLinkContext | null;
   speakerHistory: InMemorySpeakerHistoryStore;
   pending: PendingChoices;
+  /** Opens the kernel's routines scope for an answered turn; absent without `routinesIntegration`. */
+  routineTurn?: IMessageRoutineTurn;
   admit?: DecorationGate;
   paceClock?: PaceClock;
   reportTimeoutMs?: number;
@@ -466,8 +494,14 @@ async function handleTurn(rt: TurnRuntime, turn: IncomingTurn): Promise<void> {
     // reply goes out through the API, so there is no reply window and a long
     // turn needs no follow-up switch. Started only once an agent is known — a
     // refused turn shows no "typing". Hook failures never fail the turn.
+    // The routines scope wraps the agent's turn: who asks, and where a trigger
+    // or routine the agent sets now delivers later. A refused turn opens none.
+    const userId = turn.userRef.id;
+    const chat = () => agent.chat(chatInput(turn));
+    const routineTurn = rt.routineTurn;
+    const runTurn = routineTurn && userId ? () => routineTurn({ userId, conversationId: turn.conversationId })(chat) : chat;
     const { result: answer } = await runPacedTurn(
-      () => agent.chat(chatInput(turn)),
+      runTurn,
       DEFAULT_PACE_PROFILE,
       {
         sendTyping: async () => {
