@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+Reminders, triggers and routines on iMessage (byte5ai/omadia#1086, spec 2042 §5.12).
+
+- **Every answered turn opens the kernel's routines scope** (`routinesIntegration.beginRoutineTurn`) around `agent.chat`, with the sender number the agent sees as `userId`, `channel: 'imessage'` and the delivery ref `{ kind: 'channel', channelId, conversationId: <number> }`. Only then does the kernel offer `manage_routine` and the trigger tools here. `conductorBinding: false` (as Telegram and WhatsApp): one line shared by every agent is not where the person's Conductor reminders go. A refused turn opens no scope.
+- **Deliveries** go out through a proactive sender registered as `imessage` (`publishProactiveSend`), through the one emitter with the turns' speaker history: an agent's message gets a name line where an answer would, a kernel text is `system`, `NO_REPLY` is dropped. A ref naming a bot (`asChannelKey`; every agent shares the one line), a non-number, or a number outside the allowlist is refused (the run fails, nothing is sent). The number check is shared with the send providers (`numberRefusal`). The sender is removed on close.
+- `routinesIntegration@1` is declared under `optional_requires`. Without the service (no database) everything runs as before.
+
 ## 0.4.1
 
 User-visible texts no longer say "Orchestrator" (spec 2042 §6 criterion 12, `docs/terminology.md`): the manifest description, the package description, the README and the admin page now speak of your agents and the agent runtime.

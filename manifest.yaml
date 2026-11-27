@@ -15,7 +15,7 @@ identity:
   kind: "channel"
   domain: "imessage"
   name: "iMessage"
-  version: "0.4.1" # === package.json "version"
+  version: "0.5.0" # === package.json "version"
   # Every text an operator sees is an { en, de } map (byte5ai/omadia#1401). A
   # bare string would be read as English and shown as written in every UI
   # language.
@@ -60,12 +60,17 @@ depends_on: []
 #   channelResolver          — optional; Agent-binding routing (line / sender).
 #   channelDirectoryRegistry — optional; lists the line in the operator
 #                              channels dashboard as a pickable binding key.
+#   routinesIntegration      — optional, kernel-side, only with a database: each
+#                              answered turn opens its routines scope (triggers,
+#                              manage_routine) and deliveries go to the number
+#                              they were set by. Absent = no triggers here.
 # ---------------------------------------------------------------------------
 requires:
   - "chatAgent@^1"
 optional_requires:
   - "channelResolver@^1"
   - "channelDirectoryRegistry@^1"
+  - "routinesIntegration@1"
 
 lifecycle:
   entry: "dist/plugin.js" # exports `activate(ctx, core)` (ChannelPlugin shape 1)

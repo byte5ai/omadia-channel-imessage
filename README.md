@@ -283,6 +283,10 @@ and the turn runs. Where omadia reads every message of a conversation itself
 started. On a kernel without `reportConversationMessage` the message is emitted
 without waiting and the turn runs as before.
 
+## Reminders and routines
+
+An agent can set a reminder, a trigger or a recurring routine for you in an iMessage chat ("remind me tomorrow at nine"). The plugin opens the kernel's routines scope on every answered turn (`routinesIntegration.beginRoutineTurn`, never on a refused one), so the agent is offered these tools there, and registers a proactive sender for `imessage`, so the delivery later goes to the same number: an agent's message with its name line where one is needed, a message from the system (for example an approval request) as plain text. A run with nothing to report sends nothing. A number the allowlist no longer names receives nothing; the run fails instead. Needs a kernel with a database (`routinesIntegration`); without it agents set no reminders here and everything else works as before.
+
 ## Privacy & data transit
 
 > ⚠️ **All message content transits Sendblue's infrastructure** — both

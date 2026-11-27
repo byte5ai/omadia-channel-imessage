@@ -1706,3 +1706,106 @@ describe('plugin.activate — criterion 5: every emitter path names its speaker'
     }
   });
 });
+
+describe('plugin.activate — routines and triggers (omadia#1086)', () => {
+  type ProactiveSendFn = (ref: unknown, message: { text: string; speaker?: unknown }) => Promise<void>;
+
+  function fakeRoutines() {
+    const record = {
+      opened: [] as unknown[],
+      chatCallsInside: 0,
+      published: [] as Array<{ channel: string; send: ProactiveSendFn }>,
+      disposed: 0,
+      chatCallsBefore: () => 0,
+    };
+    const service = {
+      beginRoutineTurn: (info: unknown) => {
+        record.opened.push(info);
+        return async <T,>(fn: () => Promise<T>): Promise<T> => {
+          const before = record.chatCallsBefore();
+          const result = await fn();
+          record.chatCallsInside += record.chatCallsBefore() - before;
+          return result;
+        };
+      },
+      publishProactiveSend: (channel: string, send: ProactiveSendFn) => {
+        record.published.push({ channel, send });
+        return () => {
+          record.disposed += 1;
+        };
+      },
+    };
+    return { record, service };
+  }
+
+  it('opens the routines scope around the agent turn with the sender and the conversation', async () => {
+    const { record, service } = fakeRoutines();
+    const h = await startHarness({}, { routinesIntegration: service });
+    record.chatCallsBefore = () => h.chatCalls.length;
+    try {
+      await postWebhook(h.base, SECRET, inbound({ content: 'Erinnere mich morgen' }));
+      await waitFor(() => h.sends.length === 1, 'answer');
+      assert.deepEqual(record.opened, [
+        {
+          userId: SENDER,
+          channel: 'imessage',
+          conductorBinding: false,
+          conversationRef: { kind: 'channel', channelId: 'imessage-channel', conversationId: SENDER },
+        },
+      ]);
+      assert.equal(record.chatCallsInside, 1, 'the agent ran inside the scope');
+      assert.equal(h.chatCalls[0]?.userId, SENDER, 'the scope names the user id the agent sees');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('delivers through the proactive sender registered as imessage, and removes it on close', async () => {
+    const { record, service } = fakeRoutines();
+    const h = await startHarness({}, { routinesIntegration: service });
+    try {
+      assert.deepEqual(record.published.map((p) => p.channel), ['imessage']);
+      const send = record.published[0]!.send;
+      await send({ kind: 'channel', channelId: 'imessage-channel', conversationId: SENDER }, {
+        text: 'Dein Bericht ist fertig.',
+        speaker: HARNESS_SPEAKER,
+      });
+      await send({ kind: 'channel', conversationId: SENDER }, { text: 'NO_REPLY', speaker: HARNESS_SPEAKER });
+      assert.equal(h.sends.length, 1);
+      assert.equal(h.sends[0]?.body.number, SENDER);
+      assert.match(String(h.sends[0]?.body.content), /Dein Bericht ist fertig\./);
+    } finally {
+      await h.close();
+    }
+    assert.equal(record.disposed, 1);
+  });
+
+  it('refuses a delivery to a number outside the allowlist and sends nothing', async () => {
+    const { record, service } = fakeRoutines();
+    const h = await startHarness({ allowlist: '+491709999999' }, { routinesIntegration: service });
+    try {
+      await assert.rejects(
+        record.published[0]!.send({ kind: 'channel', conversationId: SENDER }, { text: 'x', speaker: HARNESS_SPEAKER }),
+        /allowlist/,
+      );
+      assert.equal(h.sends.length, 0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('a refused turn opens no scope', async () => {
+    const { record, service } = fakeRoutines();
+    const h = await startHarness({}, {
+      routinesIntegration: service,
+      channelResolver: { resolve: () => ({ decision: 'reject' }) },
+    });
+    try {
+      await postWebhook(h.base, SECRET, inbound());
+      await waitFor(() => h.sends.length === 1, 'refusal notice');
+      assert.deepEqual(record.opened, []);
+    } finally {
+      await h.close();
+    }
+  });
+});
